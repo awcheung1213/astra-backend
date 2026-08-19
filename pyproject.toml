@@ -1,0 +1,35 @@
+[tool.black]
+line-length = 300
+exclude = '''
+/(
+   alembic/versions
+ | node_modules
+ | venv
+ | .venv
+)/
+'''
+
+
+[tool.isort]
+line_length = 300
+skip = [
+   'alembic/versions',
+   'node_modules',
+   'venv',
+   '.venv'
+]
+
+
+[tool.mypy]
+ignore_missing_imports = true
+exclude = '''
+   (?x)
+   ^\.git/
+   | ^\.idea/
+   | ^alembic
+'''
+
+
+[[tool.mypy.overrides]]
+module = ['objects.*', 'adapters.*', 'utils.task_queue']
+disable_error_code = ['attr-defined']

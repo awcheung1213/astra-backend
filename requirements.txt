@@ -1,0 +1,11 @@
+alembic==1.19.1
+asyncpg==0.31.0
+fastapi==0.141.1
+httpx==0.28.1
+pg8000==1.31.2
+procrastinate[psycopg]==3.9.0
+pydantic==2.13.4
+sqlalchemy[asyncio]==2.0.52
+sqlmodel==0.0.39
+starlette==1.6.0
+uvicorn==0.52.4
