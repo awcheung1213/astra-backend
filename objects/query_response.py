@@ -23,6 +23,9 @@ class QueryResponse(SQLModel, BaseObject, table=True):
     query_text: str = Field(sa_column=Column(Text, nullable=False))
     market_id: str = Field(sa_column=Column(String, ForeignKey("markets.id"), nullable=False, index=True))
     engine: str
-    answer: str = Field(sa_column=Column(Text, nullable=False))
+    text: str = Field(sa_column=Column(Text, nullable=False))
+    # raw citation capture at collection time (the answer's sources, brand-less);
+    # analysis materializes per-brand citation ROWS from this without re-collecting
+    citations: list = Field(default_factory=list, sa_column=Column(JSONB, nullable=False, server_default="[]"))
     raw: dict = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False, server_default="{}"))
     collected_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))

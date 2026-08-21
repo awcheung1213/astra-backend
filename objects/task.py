@@ -34,7 +34,7 @@ class Task(SQLModel, BaseObject, table=True):
     tokens_spent: int = Field(default=0, sa_column=Column(Integer, server_default="0", nullable=False))
     attempt_count: int = Field(default=0, sa_column=Column(Integer, server_default="0", nullable=False))
     max_attempts: int = Field(default=3, sa_column=Column(Integer, server_default="3", nullable=False))
-    claimed_by: str | None = Field(default=None, sa_column=Column(String, nullable=True))
-    lease_expires_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
+    # no claimed_by/lease columns: claim, lease, and stalled-worker recovery are
+    # procrastinate's job (heartbeats) — this row tracks MEANING, not dispatch
     finished_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))

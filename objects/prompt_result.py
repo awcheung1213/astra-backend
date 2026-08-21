@@ -23,5 +23,10 @@ class PromptResult(SQLModel, BaseObject, table=True):
     query_response_id: str = Field(sa_column=Column(String, ForeignKey("query_responses.id"), nullable=False, index=True))
     mentioned: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
     rank: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
+    # the brand's own domain appears in the answer's citations (citation-rate component)
+    brand_cited: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
     sentiment: str | None = Field(default=None, sa_column=Column(String, nullable=True))  # positive | neutral | negative
+    # NULL = sentiment analysis pending (packed batch in flight); scoring only
+    # counts analyzed rows — sentiment NULL alone can't distinguish pending/neutral
+    analyzed_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))

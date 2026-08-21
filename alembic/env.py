@@ -6,6 +6,7 @@ from sqlmodel import SQLModel
 from alembic import context
 from objects.approval_setting import ApprovalSetting  # noqa
 from objects.artifact import Artifact  # noqa
+from objects.batch import Batch  # noqa
 from objects.brand import Brand  # noqa
 from objects.brand_market import BrandMarket  # noqa
 from objects.brand_service import BrandService  # noqa
@@ -15,6 +16,7 @@ from objects.competitor import Competitor  # noqa
 from objects.competitor_mention import CompetitorMention  # noqa
 from objects.connection import Connection  # noqa
 from objects.cost_event import CostEvent  # noqa
+from objects.finding import Finding  # noqa
 from objects.goal import Goal  # noqa
 from objects.lead import Lead  # noqa
 from objects.market import Market  # noqa
