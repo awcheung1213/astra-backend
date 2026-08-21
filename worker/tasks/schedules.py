@@ -12,8 +12,23 @@ from worker.app import app
 
 
 @app.periodic(cron="0 6 * * 1")  # Mondays 06:00 UTC
-@app.task(name="schedule_weekly_sweeps", queue="schedules")
-async def schedule_weekly_sweeps(timestamp: int) -> None:
+@app.task(name="schedule_weekly_prompt_executions", queue="schedules")
+async def schedule_weekly_prompt_executions(timestamp: int) -> None:
+    logger.info(f"[schedules] weekly prompt executions tick ts={timestamp} — stub")
+
+
+@app.periodic(cron="0 * * * *")  # hourly, on the hour
+@app.task(name="schedule_hourly_poll_batches", queue="schedules")
+async def schedule_poll_batches(timestamp: int) -> None:
+    # TODO: batches WHERE processed = false -> check provider status against its
+    #       TERMINAL_STATUSES -> defer the ingest task for terminal ones.
+    #       Cheap no-op (one indexed query) when nothing is in flight.
+    logger.info(f"[schedules] poll batches tick ts={timestamp} — stub")
+
+
+@app.periodic(cron="0 6 * * 1")  # Mondays 06:00 UTC
+@app.task(name="schedule_weekly_visibility_", queue="schedules")
+async def schedule_weekly_visibility_(timestamp: int) -> None:
     # TODO: for each active brand -> insert tasks row (type='visibility_sweep')
     #       + defer the sweep job, in ONE transaction (transactional enqueue)
     logger.info(f"[schedules] weekly sweep tick ts={timestamp} — stub, no brands fanned out yet")
