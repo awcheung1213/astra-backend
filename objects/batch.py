@@ -1,11 +1,13 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, func
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
+from constants.constants import UsageKind
 from objects.base_object import BaseObject
+from utils.database import ReplicaDatabase
 
 KIND_EXECUTE_PROMPTS = "execute_prompts"
 KIND_SENTIMENT = "sentiment"
@@ -36,3 +38,12 @@ class Batch(SQLModel, BaseObject, table=True):
     processed: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
     request_metadata: dict = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False, server_default="{}"))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def unprocessed(kind: UsageKind | None = None) -> list["Batch"]:
+        """In-flight batches the poller still needs to resolve; optionally one kind."""
+        statement = select(Batch).where(Batch.processed.is_(False))
+        if kind:
+            statement = statement.where(Batch.kind == kind)
+        rows = await ReplicaDatabase.session.execute(statement)
+        return list(rows.scalars().all())

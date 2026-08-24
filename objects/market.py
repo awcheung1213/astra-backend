@@ -26,3 +26,13 @@ class Market(SQLModel, BaseObject, table=True):
     county_gdp: Decimal | None = Field(default=None, sa_column=Column(Numeric(16, 0), nullable=True))
     census_year: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def by_brand(brand_id: str, brand_footprint: str) -> list["Market"]:
+        from objects.brand_market import BrandMarket
+
+        if brand_footprint == "local":
+            rows = await ReplicaDatabase.session.execute(select(Market).join(BrandMarket, BrandMarket.market_id == Market.id).where(BrandMarket.brand_id == brand_id, Market.is_active == True))  # type: ignore # noqa: E712
+        else:
+            rows = await ReplicaDatabase.session.execute(select(Market).where(Market.brand_id.is_(None), Market.source == SOURCE_SYSTEM, Market.is_active == True, Market.collection_market_id.is_(None)))  # type: ignore # noqa: E712
+        return list(rows.scalars().all())

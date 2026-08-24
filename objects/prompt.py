@@ -1,10 +1,11 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text, func, select
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils.database import ReplicaDatabase
 
 
 class Prompt(SQLModel, BaseObject, table=True):
@@ -22,3 +23,9 @@ class Prompt(SQLModel, BaseObject, table=True):
     # retiring stamps a date, history stays
     retired_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def by_brand(brand_id: str) -> list["Prompt"]:
+        stmt = select(Prompt).where(Prompt.retired_at.is_(None)).where(Prompt.brand_id == brand_id)
+        rows = await ReplicaDatabase.session.execute(stmt)
+        return list(rows.scalars().all())

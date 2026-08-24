@@ -1,11 +1,12 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils.database import ReplicaDatabase
 
 PLATFORM_WORDPRESS = "wordpress"
 PLATFORM_SHOPIFY = "shopify"
@@ -35,3 +36,8 @@ class Brand(SQLModel, BaseObject, table=True):
 
     onboarded_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def all() -> list["Brand"]:
+        brands = await ReplicaDatabase.session.exec(select(Brand))
+        return list(brands)
