@@ -8,6 +8,7 @@ from objects.organization import Organization
 async def submit_prompt_execution_batch() -> None:
     logger.info(f"[collection] submit_prompt_execution_batch - end", priority="medium")
 
+    
 
     logger.info(f"[collection] submit_prompt_execution_batch - end", priority="medium")
 

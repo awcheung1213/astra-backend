@@ -211,3 +211,4 @@ class UsageModel(str, enum.Enum):
     GPT_5_4_NANO_2026_03_17 = "gpt-5.4-nano-2026-03-17"
     CLAUDE_HAIKU_4_5_20251001 = "claude-haiku-4-5-20251001"
     GEMINI_3_1_FLASH_LITE = "gemini-3.1-flash-lite"
+    CLAUDE_OPUS_5 = "claude-opus-5"

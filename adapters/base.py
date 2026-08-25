@@ -21,7 +21,7 @@ class Adapter:
     async def record_cost(
         self,
         operation: str,
-        organization_id: str | None = None,  # None = system COGS (corpus collection)
+        organization_id: str | None = None,
         brand_id: str | None = None,
         task_id: str | None = None,
         model: str | None = None,
