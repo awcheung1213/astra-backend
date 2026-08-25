@@ -1,8 +1,9 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, func, select
 from sqlmodel import Field, SQLModel
+from utils.database import ReplicaDatabase
 
 from objects.base_object import BaseObject
 
@@ -30,3 +31,17 @@ class PromptResult(SQLModel, BaseObject, table=True):
     # counts analyzed rows — sentiment NULL alone can't distinguish pending/neutral
     analyzed_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def within_freshness_window(brand_id: str, engine: str) -> list["PromptResult"]:
+        freshness_window_cutoff = datetime.now() - timedelta(days=7)
+        statement = (
+            select(PromptResult)
+            .distinct(PromptResult.prompt_id, PromptResult.market_id)  # type: ignore
+            .where(PromptResult.brand_id == brand_id)
+            .where(PromptResult.engine == engine)
+            .where(PromptResult.created_at > freshness_window_cutoff)  # type: ignore
+            .order_by(PromptResult.prompt_id, PromptResult.market_id, PromptResult.created_at.desc())  # type: ignore
+        )
+        prompt_results = await ReplicaDatabase.session.execute(statement)
+        return list(prompt_results.scalars().all())

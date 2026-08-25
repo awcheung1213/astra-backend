@@ -1,9 +1,10 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select, tuple_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
+from utils.database import ReplicaDatabase
 
 from objects.base_object import BaseObject
 
@@ -29,3 +30,17 @@ class QueryResponse(SQLModel, BaseObject, table=True):
     citations: list = Field(default_factory=list, sa_column=Column(JSONB, nullable=False, server_default="[]"))
     raw: dict = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False, server_default="{}"))
     collected_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def within_freshness_window(stale_cells: set[tuple[str, str]], engine: str) -> list["QueryResponse"]:
+        freshness_window_cutoff = datetime.now() - timedelta(days=7)
+        statement = (
+            select(QueryResponse)
+            .distinct(QueryResponse.query_hash, QueryResponse.market_id)
+            .where(tuple_(QueryResponse.query_hash, QueryResponse.market_id).in_(stale_cells))
+            .where(QueryResponse.engine == engine)
+            .where(QueryResponse.collected_at > freshness_window_cutoff)
+            .order_by(QueryResponse.query_hash, QueryResponse.market_id, QueryResponse.collected_at.desc())
+        )
+        query_responses = await ReplicaDatabase.session.execute(statement)
+        return list(query_responses.scalars().all())

@@ -7,7 +7,7 @@ from sqlmodel import Field, SQLModel
 
 from constants.constants import UsageKind
 from objects.base_object import BaseObject
-from utils.database import ReplicaDatabase
+from utils.database import Database, ReplicaDatabase
 
 KIND_EXECUTE_PROMPTS = "execute_prompts"
 KIND_SENTIMENT = "sentiment"
@@ -47,3 +47,12 @@ class Batch(SQLModel, BaseObject, table=True):
             statement = statement.where(Batch.kind == kind)
         rows = await ReplicaDatabase.session.execute(statement)
         return list(rows.scalars().all())
+
+    @staticmethod
+    async def create(provider: str, batch_id: str, brand_id: str | None, status: str, request_metadata: dict, kind: UsageKind = UsageKind.EXECUTE_PROMPTS) -> "Batch":
+        batch = Batch(provider=provider, batch_id=batch_id, brand_id=brand_id, status=status, request_metadata=request_metadata, kind=kind)
+        session = Database.session
+        session.add(batch)
+        await session.flush()
+        await session.refresh(batch)
+        return batch

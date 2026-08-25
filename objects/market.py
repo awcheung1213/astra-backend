@@ -2,8 +2,9 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Column, DateTime, Integer, Numeric, UniqueConstraint, func
+from sqlalchemy import BigInteger, Column, DateTime, Integer, Numeric, UniqueConstraint, func, select
 from sqlmodel import Field, SQLModel
+from utils.database import ReplicaDatabase
 
 from objects.base_object import BaseObject
 
@@ -35,4 +36,9 @@ class Market(SQLModel, BaseObject, table=True):
             rows = await ReplicaDatabase.session.execute(select(Market).join(BrandMarket, BrandMarket.market_id == Market.id).where(BrandMarket.brand_id == brand_id, Market.is_active == True))  # type: ignore # noqa: E712
         else:
             rows = await ReplicaDatabase.session.execute(select(Market).where(Market.brand_id.is_(None), Market.source == SOURCE_SYSTEM, Market.is_active == True, Market.collection_market_id.is_(None)))  # type: ignore # noqa: E712
+        return list(rows.scalars().all())
+
+    @staticmethod
+    async def all() -> list["Market"]:
+        rows = await ReplicaDatabase.session.execute(select(Market))
         return list(rows.scalars().all())
