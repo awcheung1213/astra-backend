@@ -5,6 +5,7 @@ from constants.constants import UsageKind
 import settings
 from schemas.provider_schemas import QueryRequest, LocationContext
 from objects.brand import Brand
+from objects.cost_event import CostEvent
 from objects.prompt import Prompt
 from objects.market import Market
 from objects.prompt_result import PromptResult
@@ -14,8 +15,12 @@ from utils.query_normalization import query_hash
 
 class Collector:
 
+    ##############################
+    # BATCH SUBMISSION
+    ##############################
+
     @staticmethod
-    async def submit_prompt_execution_batch():
+    async def submit_prompt_execution_batch() -> None:
         in_process = await Collector._in_process_cells()
         brands = await Brand.all()
         queue_for_llm: dict[str, dict[tuple[str, str], dict]] = {engine_name: {} for engine_name in settings.ACTIVE_ENGINES}
@@ -102,3 +107,47 @@ class Collector:
                     continue
                 in_process.setdefault(batch_engine, set()).add((meta["query_hash"], meta["market_id"]))
         return in_process
+
+    ##############################
+    # BATCH POLL
+    ##############################
+
+    @staticmethod
+    async def poll_batches() -> None:
+        """
+        1. Poll all unprocessed batches (execution or sentiment)
+        2. For each batch, check its status with the provider
+        3. If the batch is still in-flight, update its status and continue
+        4. If the batch is ended, fetch its results and ingest them
+        5. If the batch is an execution batch, ingest the results into the corpus,
+        fan them out to every subscribing brand, and submit one sentiment batch
+        per subscribing brand for its still-unanalyzed results
+        6. If the batch is a sentiment batch, persist the analysis (sentiment,
+        positions, competitor mentions) - the rows are then report-ready
+        7. Mark the batch processed and commit (each batch is an atomic unit of
+        work)
+        """
+        batches = await Batch.unprocessed()
+
+        for batch in batches:
+            engine = initialize_adapter(adapter=f"{batch.provider}_service")
+            status = await engine.get_batch_status(batch.batch_id)
+
+            if status not in engine.TERMINAL_STATUSES:
+                await Batch.update_status(batch.id, status)
+                await Database.session.commit()
+                continue
+
+            results = await engine.get_batch_results(batch.batch_id)
+            batch.usage_summary = summarize_usage(results)
+            if results:
+                await Usage.create(usage_type=UsageType.BATCH, kind=UsageKind(batch.kind), provider=UsageProvider(batch.provider), model=UsageModel(engine.model), batch_id=batch.id, **batch.usage_summary)
+                await CostEvent.create()
+            # sentiment -> create prompt results
+            if batch.kind == UsageKind.SENTIMENT_ANALYSIS.value:
+                await _ingest_sentiment_batch(batch, results)
+            # execution -> create query_responses -> submit sentiment batch
+            else:
+                await _ingest_execution_batch(batch, results)
+            await Batch.mark_processed(batch.id, status=status)
+            await Database.session.commit()

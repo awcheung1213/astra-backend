@@ -19,7 +19,9 @@ async def submit_prompt_execution_batch() -> None:
 async def poll_batches() -> None:
     logger.info(f"[collection] poll_batches - start", priority="medium")
 
-    await Collector.poll_batches()
+    async with ReplicaDatabase().connection():
+            async with Database().connection():
+                await Collector.poll_batches()
 
     logger.info(f"[collection] poll_batches - end", priority="medium")
 
