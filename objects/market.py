@@ -5,8 +5,19 @@ from decimal import Decimal
 from sqlalchemy import BigInteger, Column, DateTime, Integer, Numeric, UniqueConstraint, func, select
 from sqlmodel import Field, SQLModel
 from utils.database import ReplicaDatabase
+from exceptions.exceptions import MarketNotFound
 
 from objects.base_object import BaseObject
+
+
+SOURCE_SYSTEM = "system"
+SOURCE_ADHOC = "adhoc"
+# shared city rows created by radius footprints (local brands); like system
+# rows they have brand_id NULL, but they never join the NATIONAL daily
+# footprint - only the footprints that subscribed to them
+SOURCE_LOCAL = "local"
+# global pseudo-market for location-independent prompt categories
+SOURCE_NATIONAL = "national"
 
 
 class Market(SQLModel, BaseObject, table=True):
@@ -27,6 +38,13 @@ class Market(SQLModel, BaseObject, table=True):
     county_gdp: Decimal | None = Field(default=None, sa_column=Column(Numeric(16, 0), nullable=True))
     census_year: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def get(id: str) -> "Market":
+        market = await ReplicaDatabase.session.get(Market, id)
+        if not market:
+            raise MarketNotFound()
+        return market
 
     @staticmethod
     async def by_brand(brand_id: str, brand_footprint: str) -> list["Market"]:

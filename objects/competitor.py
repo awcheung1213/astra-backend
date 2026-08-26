@@ -58,6 +58,18 @@ class Competitor(SQLModel, BaseObject, table=True):
         return "".join(words)
 
     @staticmethod
+    async def get_competitors_by_brand_id(brand_id: str) -> list["Competitor"]:
+        """The brand's non-excluded competitor rows — the matcher's input."""
+        rows = await ReplicaDatabase.session.execute(select(Competitor).where(Competitor.brand_id == brand_id, Competitor.is_excluded == False))  # type: ignore  # noqa: E712
+        return list(rows.scalars().all())
+
+    @staticmethod
+    async def excluded_names(brand_id: str) -> set[str]:
+        """Normalized names this brand has excluded - the matcher skips them."""
+        rows = await ReplicaDatabase.session.execute(select(Competitor.normalized_name).where(Competitor.brand_id == brand_id, Competitor.is_excluded == True))  # type: ignore  # noqa: E712
+        return set(rows.scalars().all())
+
+    @staticmethod
     async def create(
         brand_id: str,
         name: str,

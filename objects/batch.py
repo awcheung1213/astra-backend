@@ -49,10 +49,27 @@ class Batch(SQLModel, BaseObject, table=True):
         return list(rows.scalars().all())
 
     @staticmethod
+    async def update_status(id: str, status: str) -> "Batch":
+        batch = await Database.session.get(Batch, id)
+        batch.status = status
+        Database.session.add(batch)
+        await Database.session.flush()
+        return batch
+
+    @staticmethod
     async def create(provider: str, batch_id: str, brand_id: str | None, status: str, request_metadata: dict, kind: UsageKind = UsageKind.EXECUTE_PROMPTS) -> "Batch":
         batch = Batch(provider=provider, batch_id=batch_id, brand_id=brand_id, status=status, request_metadata=request_metadata, kind=kind)
         session = Database.session
         session.add(batch)
         await session.flush()
         await session.refresh(batch)
+        return batch
+
+    @staticmethod
+    async def mark_processed(id: str, status: str) -> "Batch":
+        batch = await Database.session.get(Batch, id)
+        batch.status = status
+        batch.processed = True
+        Database.session.add(batch)
+        await Database.session.flush()
         return batch

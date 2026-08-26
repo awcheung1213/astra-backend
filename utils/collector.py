@@ -1,3 +1,4 @@
+import json
 from utils.database import Database
 from utils.llm_usage import estimate_cost, summarize_usage
 from objects.batch import Batch
@@ -6,6 +7,7 @@ from constants.constants import UsageKind
 import settings
 from schemas.provider_schemas import QueryRequest, QueryResult, LocationContext
 from objects.brand import Brand
+from objects.citation import Citation
 from objects.competitor import Competitor
 from objects.competitor_mention import CompetitorMention
 from objects.cost_event import CostEvent
@@ -18,6 +20,88 @@ from utils.query_normalization import query_hash
 from utils.logger import logger
 from utils.competitor_matching import build_competitor_regex_patterns, parse_prompt_result_for_competitor_mention_rank
 from utils.response_parsing import parse_prompt_result_for_mention_rank
+
+
+RESPONSE_TRUNCATE_CHARS = 1500
+# Sentiment analysis is packed: many responses per LLM call, instead of one
+# call per response. The instructions live in the (cached) system block; the
+# user message carries the numbered responses.
+SENTIMENT_PACK_SIZE = 15
+DISCOVERY_SAMPLE_MODULO = 20
+
+
+_PACK_ITEM_BASE_PROPERTIES = {
+    "index": {"type": "integer"},
+    "brand_mention_position": {"type": ["integer", "null"]},
+    "positive_sentiment": {"type": "boolean"},
+    "top_3_position": {"type": "boolean"},
+}
+
+
+SENTIMENT_ANALYSIS_SYSTEM_PROMPT = """You analyze how a brand appears in AI search responses.
+
+You will receive a brand name and several AI responses, each labeled '### Response N'. For EACH response, return one result object carrying its index N and, judged objectively for that response alone:
+- brand_mention_position (int or null): 1-indexed rank if the brand is in a ranked/ordered list; null if not mentioned or not in a ranked list.
+- positive_sentiment (bool): true ONLY if the brand is framed favorably (recommended, praised, top pick). Neutral inclusion in a list is NOT positive. false if neutral, negative, or not mentioned.
+- top_3_position (bool): true if the brand is in positions 1-3 of a ranked list; otherwise false.
+
+Return exactly one result per response, in order."""
+
+
+SENTIMENT_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": dict(_PACK_ITEM_BASE_PROPERTIES),
+                "required": ["index", "brand_mention_position", "positive_sentiment", "top_3_position"],
+            },
+        },
+    },
+    "required": ["results"],
+}
+
+
+COMPETITOR_DISCOVERY_SYSTEM_PROMPT = """You analyze how a brand appears in AI search responses.
+
+You will receive a brand name and several AI responses, each labeled '### Response N'. For EACH response, return one result object carrying its index N and, judged objectively for that response alone:
+- brand_mention_position (int or null): 1-indexed rank if the brand is in a ranked/ordered list; null if not mentioned or not in a ranked list.
+- positive_sentiment (bool): true ONLY if the brand is framed favorably (recommended, praised, top pick). Neutral inclusion in a list is NOT positive. false if neutral, negative, or not mentioned.
+- top_3_position (bool): true if the brand is in positions 1-3 of a ranked list; otherwise false.
+- competitor_mentions (array): competing brands in the same product category (exclude retailers/marketplaces) mentioned in that response (exclude the analyzed brand). For each, include name and position (1-indexed rank in ranked list, or null if not in a ranked list).
+
+Return exactly one result per response, in order."""
+
+
+COMPETITOR_DISCOVERY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    **_PACK_ITEM_BASE_PROPERTIES,
+                    "competitor_mentions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "position": {"type": ["integer", "null"]},
+                            },
+                            "required": ["name", "position"],
+                        },
+                    },
+                },
+                "required": ["index", "brand_mention_position", "positive_sentiment", "top_3_position", "competitor_mentions"],
+            },
+        },
+    },
+    "required": ["results"],
+}
 
 
 class Collector:
@@ -167,15 +251,15 @@ class Collector:
                 )
             # sentiment -> create prompt results
             if batch.kind == UsageKind.SENTIMENT_ANALYSIS.value:
-                await Collector._ingest_sentiment_batch(batch, results)
+                await Collector.ingest_sentiment_batch(batch, results)
             # execution -> create query_responses -> submit sentiment batch
             else:
-                await _ingest_execution_batch(batch, results)
+                await Collector.ingest_execution_batch(batch, results)
             await Batch.mark_processed(batch.id, status=status)
             await Database.session.commit()
 
     @staticmethod
-    async def _ingest_sentiment_batch(batch: Batch, results: list[QueryResult]) -> None:
+    async def ingest_sentiment_batch(batch: Batch, results: list[QueryResult]) -> None:
         sentiment_batch_outputs: list[tuple[dict, list[str], str]] = []
         prompt_result_ids_with_mentions: set[str] = set()
         for result in results:
@@ -208,7 +292,7 @@ class Collector:
         for structured_outputs, prompt_result_ids, pack_kind in responses_with_ids:
             for prompt_result_id, structured_output in Collector._map_prompt_result_ids_to_structured_outputs(structured_outputs, prompt_result_ids):
                 sentiment_by_prompt_result_id[prompt_result_id] = structured_output
-                if pack_kind == UsageKind.COMPETITOR_DISCOVERY.value:
+                if pack_kind == UsageKind.COMPETITOR_DISCOVERY:
                     competitors_discovered.extend(mention["name"] for mention in structured_output.get("competitor_mentions", []))
         return sentiment_by_prompt_result_id, competitors_discovered
 
@@ -297,3 +381,137 @@ class Collector:
             prompt_results_by_id[prompt_result_with_competitor_mentions.id] = prompt_result_with_competitor_mentions
 
         return prompt_results_by_id
+
+    @staticmethod
+    async def ingest_execution_batch(batch: Batch, results: list[QueryResult]) -> None:
+        from dataclasses import asdict
+
+        subscribed_brand_ids: set[str] = set()
+        for result in results:
+            if result.error:
+                continue
+            meta = batch.request_metadata[result.custom_id]
+            market = await Market.get(meta["market_id"])
+            query_response = await QueryResponse.create(
+                query_hash=meta["query_hash"],
+                query_text=meta["query_text"],
+                market=market,
+                engine=batch.provider,
+                text=result.text,
+                raw=result.raw or {},
+                citations=[asdict(citation) for citation in (result.citations or [])],
+            )
+            for subscriber in meta["subscribers"]:
+                brand = (await Brand.get(subscriber["brand_id"])).model_dump()
+                await Collector._create_prompt_result_from_query_response(brand, subscriber["prompt_id"], query_response, market_id=market.id)
+                subscribed_brand_ids.add(subscriber["brand_id"])
+
+        for subscribed_brand_id in sorted(subscribed_brand_ids):
+            brand = (await Brand.get(subscribed_brand_id)).model_dump()
+            await Collector._submit_analysis_batch(brand)
+
+    @staticmethod
+    async def _create_prompt_result_from_query_response(brand: dict, prompt_id: str, query_response: QueryResponse, market_id: str | None = None) -> PromptResult:
+        brand_name = brand["name"].lower()
+        citations = query_response.citations or []
+        prompt_result = await PromptResult.create(
+            prompt_id=prompt_id,
+            market_id=market_id or query_response.market_id,
+            brand_id=brand["id"],
+            engine=query_response.engine,
+            text=query_response.text,
+            raw=json.dumps(query_response.raw),
+            brand_cited=(brand_name in " ".join((citation.get("cited_text") or "").lower() for citation in citations)),
+            brand_mentioned=(brand_name in query_response.text.lower()),
+            query_response_id=query_response.id,
+        )
+        unique_citations: set[tuple[str, str]] = set()
+        for citation in citations:
+            key = (citation.get("url") or "", citation.get("cited_text") or "")
+            if key in unique_citations:
+                continue
+            unique_citations.add(key)
+            await Citation.create(
+                brand_id=brand["id"],
+                prompt_id=prompt_id,
+                prompt_result_id=prompt_result.id,
+                cited_text=citation.get("cited_text") or "",
+                title=citation.get("title") or "",
+                type=citation.get("type") or "",
+                url=citation.get("url") or "",
+                domain=citation.get("domain") or None,
+            )
+        return prompt_result
+
+    @staticmethod
+    async def _submit_analysis_batch(brand: dict) -> None:
+        in_process = await Collector._prompt_result_ids_in_process()
+
+        prompt_results_pending_analysis: list[PromptResult] = [prompt_result for prompt_result in await PromptResult.filter(brand_id=brand["id"], contains_sentiment_analysis=False) if prompt_result.id not in in_process]
+
+        prompt_results_for_sentiment_analysis, prompt_results_for_competitor_discovery = Collector._categorize_into_sentiment_or_competitor_discovery_analysis(prompt_results_pending_analysis)
+        prompt_results_pending_analysis_ids = {prompt_result.id for prompt_result in [*prompt_results_for_sentiment_analysis, *prompt_results_for_competitor_discovery]}
+        prompt_results_without_brand_mentions = [prompt_result for prompt_result in prompt_results_pending_analysis if prompt_result.id not in prompt_results_pending_analysis_ids]
+
+        # analyze to prevent memory leak at `prompt_results_pending_analysis`
+        if prompt_results_without_brand_mentions:
+            await Collector._analyze_prompt_results(brand, prompt_results_without_brand_mentions, {}, [])
+
+        # multiple prompt results analyzed in a single response
+        tasks = []
+        request_metadata: dict = {}
+
+        # first task classifies domains/prompts
+        new_domains = await Citation.domains_from_prompt_results_pending_analysis(prompt_results_pending_analysis_ids)
+
+        for prompt_results, pack_kind, system_prompt, schema in (
+            (prompt_results_for_sentiment_analysis, UsageKind.SENTIMENT_ANALYSIS.value, SENTIMENT_ANALYSIS_SYSTEM_PROMPT, SENTIMENT_ANALYSIS_SCHEMA),
+            (prompt_results_for_competitor_discovery, UsageKind.COMPETITOR_DISCOVERY.value, COMPETITOR_DISCOVERY_SYSTEM_PROMPT, COMPETITOR_DISCOVERY_SCHEMA),
+        ):
+            for chunk in Collector._chunk_prompt_results(prompt_results):
+                custom_id = str(len(tasks))
+                request_metadata[custom_id] = {"brand_id": brand["id"], "prompt_result_ids": [prompt_result.id for prompt_result in chunk], "pack_kind": pack_kind}
+                tasks.append(
+                    QueryRequest(
+                        custom_id=custom_id,
+                        prompt=Collector._build_sentiment_analysis_prompt(brand["name"], chunk),
+                        system=system_prompt,
+                        schema=schema,
+                        cache_system=True,
+                    )
+                )
+
+        if not tasks:
+            logger.info(f"brand {brand['id']} has no unanalyzed prompt results; skipping sentiment batch submission")
+            return
+
+        handle = await sentiment_service().submit_batch(tasks)
+        await Batch.create(provider=handle.provider, batch_id=handle.batch_id, brand_id=brand["id"], status=handle.status, request_metadata=request_metadata, kind=UsageKind.SENTIMENT_ANALYSIS)
+
+    @staticmethod
+    def _is_discovery_sample(prompt_result_id: str) -> bool:
+        """Deterministic sampling: ~5% get LLM competitor discovery"""
+        return int(hashlib.md5(prompt_result_id.encode()).hexdigest(), 16) % DISCOVERY_SAMPLE_MODULO == 0
+
+    @staticmethod
+    def _categorize_into_sentiment_or_competitor_discovery_analysis(prompt_results: list[PromptResult]) -> tuple[list[PromptResult], list[PromptResult]]:
+        prompts_for_competitor_discovery = [prompt_result for prompt_result in prompt_results if Collector._is_discovery_sample(prompt_result.id)]
+        prompts_for_competitor_discovery_ids = {prompt_result.id for prompt_result in prompts_for_competitor_discovery}
+        # prompts_for_competitor_discovery already contain the sentiment analysis
+        prompts_for_sentiment_analysis = [prompt_result for prompt_result in prompt_results if prompt_result.brand_mentioned and prompt_result.id not in prompts_for_competitor_discovery_ids]
+        return prompts_for_sentiment_analysis, prompts_for_competitor_discovery
+
+    @staticmethod
+    def _chunk_prompt_results(prompt_results: list[PromptResult]) -> list[list[PromptResult]]:
+        packs = []
+        for start in range(0, len(prompt_results), SENTIMENT_PACK_SIZE):
+            end = start + SENTIMENT_PACK_SIZE
+            packs.append(prompt_results[start:end])
+        return packs
+
+    @staticmethod
+    def _build_sentiment_analysis_prompt(brand_name: str, prompt_results: list[PromptResult]) -> str:
+        sections = [f"Brand: {brand_name}"]
+        for index, prompt_result in enumerate(prompt_results):
+            sections.append(f"### Response {index}\n{prompt_result.text[:RESPONSE_TRUNCATE_CHARS]}")
+        return "\n\n".join(sections)

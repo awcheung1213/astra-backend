@@ -34,3 +34,7 @@ class CompetitorNotFound(HTTPException):
 class CompetitorMentionNotFound(HTTPException):
     def __init__(self) -> None:
         super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail="competitor mention not found")
+
+class MarketNotFound(HTTPException):
+    def __init__(self) -> None:
+        super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail="market not found")

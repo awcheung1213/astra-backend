@@ -1,10 +1,11 @@
 import uuid
 from datetime import datetime, timedelta
 
+from objects.market import Market, SOURCE_NATIONAL
 from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select, tuple_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
-from utils.database import ReplicaDatabase
+from utils.database import Database, ReplicaDatabase
 
 from objects.base_object import BaseObject
 
@@ -44,3 +45,13 @@ class QueryResponse(SQLModel, BaseObject, table=True):
         )
         query_responses = await ReplicaDatabase.session.execute(statement)
         return list(query_responses.scalars().all())
+
+    @staticmethod
+    async def create(query_hash: str, query_text: str, market: Market, engine: str, text: str, raw: dict, citations: list) -> "QueryResponse":
+        is_national = market.source == SOURCE_NATIONAL
+        response = QueryResponse(query_hash=query_hash, query_text=query_text, market_id=market.id, city=None if is_national else market.city, state=None if is_national else market.state, engine=engine, text=text, raw=raw, citations=citations)
+        session = Database.session
+        session.add(response)
+        await session.flush()
+        await session.refresh(response)
+        return response
