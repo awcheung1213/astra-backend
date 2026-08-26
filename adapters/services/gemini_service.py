@@ -4,11 +4,10 @@ import json
 import httpx
 from google import genai
 from google.genai import types
-from urllib.parse import urlparse
 
 import settings
 from constants.constants import UsageModel
-from objects.citation import Citation
+from utils.urls import domain_from_url
 from schemas.provider_schemas import BatchHandle, CitationContext, LocationContext, QueryRequest, QueryResult
 from utils.logger import logger
 
@@ -269,11 +268,4 @@ class GeminiService:
 
     @staticmethod
     def _domain_from_url(url: str) -> str:
-            """Extract the host portion of a url (scheme, path, query and port stripped).
-    
-            e.g. "https://www.example.com/article?x=1" -> "www.example.com"
-            """
-            # Prefix a scheme-less url with "//" so urlparse treats it as a network
-            # location rather than a path.
-            netloc = urlparse(url if "//" in url else f"//{url}").netloc
-            return netloc.split(":")[0]
+        return domain_from_url(url)

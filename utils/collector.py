@@ -16,10 +16,11 @@ from objects.competitor_mention import CompetitorMention
 from objects.cost_event import CostEvent
 from objects.prompt import Prompt
 from objects.market import Market
-from objects.prompt_result import PromptResult
+from objects.prompt_result import SENTIMENT_NEUTRAL, SENTIMENT_POSITIVE, PromptResult
 from objects.query_response import QueryResponse
 from schemas.prompt_result_schemas import PromptResultWithCompetitorMentions
 from utils.query_normalization import query_hash
+from utils.visibility import hydrate_prompt_result
 from utils.logger import logger
 from utils.competitor_matching import build_competitor_regex_patterns, parse_prompt_result_for_competitor_mention_rank
 from utils.response_parsing import parse_prompt_result_for_mention_rank
@@ -333,22 +334,28 @@ class Collector:
         excluded_names = await Competitor.excluded_names(brand["id"])
 
         prompt_results_by_id: dict[str, PromptResultWithCompetitorMentions] = {}
-        parsed_count = 0
 
         for prompt_result in prompt_results:
             sentiment_structured_output = sentiment_by_id.get(prompt_result.id)
             mention_rank = parse_prompt_result_for_mention_rank(prompt_result.text, [brand["name"]])[brand["name"]]
 
+            # rank: the free string parse wins; the pack's brand_mention_position
+            # is the fallback for answers the list parser couldn't rank. Top-3
+            # is DERIVED from rank downstream (rank <= 3), not stored.
             if mention_rank is not None:
-                parsed_count += 1
-                position = mention_rank
-                top_3 = mention_rank <= 3
+                rank = mention_rank
             elif sentiment_structured_output is not None:
-                position = sentiment_structured_output["brand_mention_position"]
-                top_3 = sentiment_structured_output["top_3_position"]
+                rank = sentiment_structured_output["brand_mention_position"]
             else:
-                position = None
-                top_3 = False
+                rank = None
+
+            # sentiment verdict: the pack only distinguishes positive / not
+            # positive; no pack verdict (silent majority) stays None. Either
+            # way analyzed_at is stamped — analysis is final.
+            if sentiment_structured_output is not None:
+                sentiment = SENTIMENT_POSITIVE if sentiment_structured_output.get("positive_sentiment") else SENTIMENT_NEUTRAL
+            else:
+                sentiment = None
 
             # fmt: off
             competitor_mention_ranks = [
@@ -359,31 +366,22 @@ class Collector:
             ]
             # fmt: on
 
-            prompt_result_with_sentiment = await PromptResult.update(
-                id=prompt_result.id,
-                brand_mention_position=position,
-                positive_sentiment=bool(sentiment_structured_output["positive_sentiment"]) if sentiment_structured_output is not None else False,
-                top_3_position=top_3,
-                competitor_mention_count=len(competitor_mention_ranks),
-            )
+            analyzed_prompt_result = await PromptResult.update(id=prompt_result.id, rank=rank, sentiment=sentiment)
 
-            prompt_result_with_competitor_mentions = PromptResultWithCompetitorMentions(
-                **prompt_result_with_sentiment.model_dump(),
-                competitor_mentions=[],
-            )
-
+            mentions = []
             for name, mention_rank in competitor_mention_ranks:
                 created_competitor = await Competitor.upsert(brand_id=brand["id"], name=name)
-                result_competitor_mention = await CompetitorMention.create(
-                    prompt_result_id=prompt_result.id,
-                    name=name,
-                    normalized_name=created_competitor.normalized_name,
-                    competitor_id=created_competitor.id,
-                    position=mention_rank,
+                mentions.append(
+                    await CompetitorMention.create(
+                        prompt_result_id=prompt_result.id,
+                        name=name,
+                        normalized_name=created_competitor.normalized_name,
+                        competitor_id=created_competitor.id,
+                        position=mention_rank,
+                    )
                 )
-                prompt_result_with_competitor_mentions.competitor_mentions.append(result_competitor_mention)
 
-            prompt_results_by_id[prompt_result_with_competitor_mentions.id] = prompt_result_with_competitor_mentions
+            prompt_results_by_id[prompt_result.id] = hydrate_prompt_result(analyzed_prompt_result, mentions)
 
         return prompt_results_by_id
 

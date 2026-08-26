@@ -86,7 +86,11 @@ def week_of_today() -> date:
     return today - timedelta(days=today.weekday())
 
 
-def _hydrate(result: PromptResult, mentions: list[CompetitorMention]) -> PromptResultWithCompetitorMentions:
+def hydrate_prompt_result(result: PromptResult, mentions: list[CompetitorMention]) -> PromptResultWithCompetitorMentions:
+    """Row(s) -> the scoring/analysis dataclass. Derived fields live HERE:
+    positive_sentiment (sentiment == positive; None = no verdict), top-3
+    (rank <= 3), competitor_mention_count. Shared with the collector's
+    analysis step so both paths hydrate identically."""
     return PromptResultWithCompetitorMentions(
         id=result.id,
         prompt_id=result.prompt_id,
@@ -96,7 +100,7 @@ def _hydrate(result: PromptResult, mentions: list[CompetitorMention]) -> PromptR
         text=result.text,
         raw=result.raw,
         brand_cited=result.brand_cited,
-        brand_mentioned=result.mentioned,
+        brand_mentioned=result.brand_mentioned,
         brand_mention_position=result.rank,
         positive_sentiment=None if result.sentiment is None else result.sentiment == SENTIMENT_POSITIVE,
         top_3_position=result.rank is not None and result.rank <= TOP_3_RANK,
@@ -139,7 +143,7 @@ async def run_visibility_sweep(brand_id: str) -> VisibilityRun | None:
     mentions_by_result: dict[str, list[CompetitorMention]] = {}
     for mention in await CompetitorMention.by_prompt_result_ids([result.id for result in prompt_results]):
         mentions_by_result.setdefault(mention.prompt_result_id, []).append(mention)
-    scored = [_hydrate(result, mentions_by_result.get(result.id, [])) for result in prompt_results]
+    scored = [hydrate_prompt_result(result, mentions_by_result.get(result.id, [])) for result in prompt_results]
 
     markets_by_id = {market.id: market for market in await Market.all()}
     national_market_ids = {market_id for market_id in {result.market_id for result in scored} if markets_by_id.get(market_id) and markets_by_id[market_id].source == SOURCE_NATIONAL}

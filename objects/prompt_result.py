@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime, timedelta
 from exceptions.exceptions import PromptResultNotFound
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, func, select, text, update
-from sqlmodel import Field, SQLModel
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, func, select, text, update
+from sqlmodel import Field, SQLModel, delete
 from utils.database import Database, ReplicaDatabase
 
 from objects.base_object import BaseObject
@@ -16,26 +16,21 @@ class PromptResult(SQLModel, BaseObject, table=True):
     """A brand's read of a corpus answer — the cheap derived row."""
 
     __tablename__ = "prompt_results"
-    # the cell lookup (freshness windows, newest-analyzed-per-cell) walks
-    # (prompt, market, engine) newest-first — one index serves all of them
     __table_args__ = (Index("ix_prompt_results_cell_created", "prompt_id", "market_id", "engine", text("created_at DESC")),)
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     prompt_id: str = Field(sa_column=Column(String, ForeignKey("prompts.id", ondelete="CASCADE"), nullable=False, index=True))
     brand_id: str = Field(sa_column=Column(String, ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True))
-    # denormalized from the corpus row: every scoring/freshness query filters
-    # or groups on these (typed-columns rule)
     market_id: str = Field(sa_column=Column(String, ForeignKey("markets.id"), nullable=False))
     engine: str
     visibility_run_id: str | None = Field(default=None, sa_column=Column(String, ForeignKey("visibility_runs.id"), nullable=True, index=True))
     query_response_id: str = Field(sa_column=Column(String, ForeignKey("query_responses.id"), nullable=False, index=True))
-    mentioned: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
+    text: str = Field(sa_column=Column(Text, nullable=False, server_default=""))
+    raw: str = Field(sa_column=Column(Text, nullable=False, server_default=""))
+    brand_mentioned: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
     rank: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
-    # the brand's own domain appears in the answer's citations (citation-rate component)
     brand_cited: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
     sentiment: str | None = Field(default=None, sa_column=Column(String, nullable=True))  # positive | neutral | negative
-    # NULL = sentiment analysis pending (packed batch in flight); scoring only
-    # counts analyzed rows — sentiment NULL alone can't distinguish pending/neutral
     analyzed_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
 
@@ -74,6 +69,23 @@ class PromptResult(SQLModel, BaseObject, table=True):
         return list(prompt_results.scalars().all())
 
     @staticmethod
+    async def update(id: str, rank: int | None = None, sentiment: str | None = None) -> "PromptResult":
+        """Finalize a result's analysis: rank + sentiment verdict, and stamp
+        analyzed_at — analysis is final; scoring only counts analyzed rows.
+        None values are meaningful (not mentioned / no sentiment verdict)."""
+        prompt_result = await Database.session.get(PromptResult, id)
+        if not prompt_result:
+            raise PromptResultNotFound()
+        prompt_result.rank = rank
+        prompt_result.sentiment = sentiment
+        prompt_result.analyzed_at = datetime.now()
+        session = Database.session
+        session.add(prompt_result)
+        await session.flush()
+        await session.refresh(prompt_result)
+        return prompt_result
+
+    @staticmethod
     async def assign_visibility_run(ids: list[str], visibility_run_id: str) -> None:
         """Stamp the scored results with their run — astra's replacement for
         geoviz's prompt_result <-> visibility_score join table."""
@@ -95,3 +107,36 @@ class PromptResult(SQLModel, BaseObject, table=True):
         )
         prompt_results = await ReplicaDatabase.session.execute(statement)
         return list(prompt_results.scalars().all())
+
+    @staticmethod
+    async def create(
+        prompt_id: str,
+        market_id: str,
+        brand_id: str,
+        engine: str,
+        text: str,
+        raw: str,
+        brand_cited: bool,
+        brand_mentioned: bool,
+        query_response_id: str | None = None,
+    ) -> "PromptResult":
+        prompt_result = PromptResult(
+            prompt_id=prompt_id,
+            market_id=market_id,
+            brand_id=brand_id,
+            engine=engine,
+            text=text,
+            raw=raw,
+            brand_cited=brand_cited,
+            brand_mentioned=brand_mentioned,
+            query_response_id=query_response_id,
+        )
+        session = Database.session
+        session.add(prompt_result)
+        await session.flush()
+        await session.refresh(prompt_result)
+        return prompt_result
+
+    @staticmethod
+    async def delete(id: str) -> None:
+        await Database.session.execute(delete(PromptResult).where(PromptResult.id == id))  # type: ignore
