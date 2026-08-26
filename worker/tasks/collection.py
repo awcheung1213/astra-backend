@@ -24,13 +24,3 @@ async def poll_batches() -> None:
                 await Collector.poll_batches()
 
     logger.info(f"[collection] poll_batches - end", priority="medium")
-
-
-# @app.task(name="ingest_execution_batch", queue="collection")
-# async def ingest_execution_batch() -> None:
-#     logger.info(f"[collection] ingest_execution_batch - end", priority="medium")
-
-
-# @app.task(name="ingest_sentiment_batch", queue="collection")
-# async def ingest_sentiment_batch() -> None:
-#     logger.info(f"[collection] ingest_sentiment_batch - end", priority="medium")

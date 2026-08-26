@@ -4,10 +4,11 @@ import json
 import httpx
 from google import genai
 from google.genai import types
+from urllib.parse import urlparse
 
 import settings
 from constants.constants import UsageModel
-from objects.citation import domain_from_url
+from objects.citation import Citation
 from schemas.provider_schemas import BatchHandle, CitationContext, LocationContext, QueryRequest, QueryResult
 from utils.logger import logger
 
@@ -172,7 +173,7 @@ class GeminiService:
                 source_url = resolved.get(citation.url)
                 if source_url:
                     citation.url = source_url
-                    citation.domain = domain_from_url(source_url) or citation.domain
+                    citation.domain = GeminiService._domain_from_url(source_url) or citation.domain
 
     async def _query_one(self, req: QueryRequest) -> QueryResult:
         result = await self.query(req.prompt, req.location, req.system, req.schema, req.use_web_search, req.cache_system)
@@ -265,3 +266,14 @@ class GeminiService:
             "output_tokens": usage.candidates_token_count or 0,
             "server_tool_use": {"web_search_requests": searches},
         }
+
+    @staticmethod
+    def _domain_from_url(url: str) -> str:
+            """Extract the host portion of a url (scheme, path, query and port stripped).
+    
+            e.g. "https://www.example.com/article?x=1" -> "www.example.com"
+            """
+            # Prefix a scheme-less url with "//" so urlparse treats it as a network
+            # location rather than a path.
+            netloc = urlparse(url if "//" in url else f"//{url}").netloc
+            return netloc.split(":")[0]

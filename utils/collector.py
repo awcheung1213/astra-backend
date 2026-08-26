@@ -1,8 +1,11 @@
+import hashlib
 import json
+
 from utils.database import Database
 from utils.llm_usage import estimate_cost, summarize_usage
 from objects.batch import Batch
 from adapters.registry import initialize_adapter
+from adapters.services.claude_service import ClaudeService
 from constants.constants import UsageKind
 import settings
 from schemas.provider_schemas import QueryRequest, QueryResult, LocationContext
@@ -27,6 +30,7 @@ RESPONSE_TRUNCATE_CHARS = 1500
 # call per response. The instructions live in the (cached) system block; the
 # user message carries the numbered responses.
 SENTIMENT_PACK_SIZE = 15
+SENTIMENT_PACK_MAX_TOKENS = 4096
 DISCOVERY_SAMPLE_MODULO = 20
 
 
@@ -238,16 +242,17 @@ class Collector:
 
             results = await engine.get_batch_results(batch.batch_id)
             if results:
+                usage = summarize_usage(results)
                 await CostEvent.create(
                     adapter=batch.provider,
                     operation=batch.kind,
                     brand_id=batch.brand_id,
                     task_id=batch.task_id,
                     model=engine.model,
-                    input_tokens=batch.usage_summary["input_tokens"],
-                    output_tokens=batch.usage_summary["output_tokens"],
-                    web_search_count=batch.usage_summary["web_searches"],
-                    usd=estimate_cost(batch.provider, engine.model, batch.usage_summary["input_tokens"], batch.usage_summary["output_tokens"], batch.usage_summary["web_searches"], batch=True),
+                    input_tokens=usage["input_tokens"],
+                    output_tokens=usage["output_tokens"],
+                    web_search_count=usage["web_searches"],
+                    usd=estimate_cost(batch.provider, engine.model, usage["input_tokens"], usage["output_tokens"], usage["web_searches"], batch=True),
                 )
             # sentiment -> create prompt results
             if batch.kind == UsageKind.SENTIMENT_ANALYSIS.value:
@@ -461,9 +466,6 @@ class Collector:
         tasks = []
         request_metadata: dict = {}
 
-        # first task classifies domains/prompts
-        new_domains = await Citation.domains_from_prompt_results_pending_analysis(prompt_results_pending_analysis_ids)
-
         for prompt_results, pack_kind, system_prompt, schema in (
             (prompt_results_for_sentiment_analysis, UsageKind.SENTIMENT_ANALYSIS.value, SENTIMENT_ANALYSIS_SYSTEM_PROMPT, SENTIMENT_ANALYSIS_SCHEMA),
             (prompt_results_for_competitor_discovery, UsageKind.COMPETITOR_DISCOVERY.value, COMPETITOR_DISCOVERY_SYSTEM_PROMPT, COMPETITOR_DISCOVERY_SCHEMA),
@@ -485,7 +487,7 @@ class Collector:
             logger.info(f"brand {brand['id']} has no unanalyzed prompt results; skipping sentiment batch submission")
             return
 
-        handle = await sentiment_service().submit_batch(tasks)
+        handle = await ClaudeService(use_web_search=False, max_tokens=SENTIMENT_PACK_MAX_TOKENS).submit_batch(tasks)
         await Batch.create(provider=handle.provider, batch_id=handle.batch_id, brand_id=brand["id"], status=handle.status, request_metadata=request_metadata, kind=UsageKind.SENTIMENT_ANALYSIS)
 
     @staticmethod
