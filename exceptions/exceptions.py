@@ -19,3 +19,18 @@ class TaskNotFound(HTTPException):
 class ArtifactNotFound(HTTPException):
     def __init__(self) -> None:
         super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found")
+
+
+class PromptResultNotFound(HTTPException):
+    def __init__(self) -> None:
+        super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail="prompt result not found")
+
+
+class CompetitorNotFound(HTTPException):
+    def __init__(self) -> None:
+        super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail="competitor not found")
+
+
+class CompetitorMentionNotFound(HTTPException):
+    def __init__(self) -> None:
+        super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail="competitor mention not found")

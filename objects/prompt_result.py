@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timedelta
-
+from exceptions.exceptions import PromptResultNotFound
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, func, select
 from sqlmodel import Field, SQLModel
 from utils.database import ReplicaDatabase
@@ -31,6 +31,40 @@ class PromptResult(SQLModel, BaseObject, table=True):
     # counts analyzed rows — sentiment NULL alone can't distinguish pending/neutral
     analyzed_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def get(id: str) -> "PromptResult":
+        prompt_result = await ReplicaDatabase.session.get(PromptResult, id)
+        if not prompt_result:
+            raise PromptResultNotFound()
+        return prompt_result
+
+    @staticmethod
+    async def filter(
+        brand_id: str,
+        ids: list[str] | None = None,
+        market_ids: list[str] | None = None,
+        contains_sentiment_analysis: bool | None = None,
+    ) -> list["PromptResult"]:
+        horizon = datetime.now() - timedelta(days=7)
+        statement = (
+            select(PromptResult)
+            .distinct(PromptResult.prompt_id, PromptResult.market_id, PromptResult.engine)  # type: ignore
+            .where(PromptResult.brand_id == brand_id)
+            .where(PromptResult.created_at > horizon)  # type: ignore
+            .order_by(PromptResult.prompt_id, PromptResult.market_id, PromptResult.engine, PromptResult.created_at.desc())  # type: ignore
+        )
+        if contains_sentiment_analysis is True:
+            statement = statement.where(PromptResult.positive_sentiment.isnot(None))  # type: ignore
+        elif contains_sentiment_analysis is False:
+            statement = statement.where(PromptResult.positive_sentiment.is_(None))  # type: ignore
+        if ids is not None:
+            statement = statement.where(PromptResult.id.in_(ids))
+        if market_ids is not None:
+            statement = statement.where(PromptResult.market_id.in_(market_ids))
+
+        prompt_results = await ReplicaDatabase.session.execute(statement)
+        return list(prompt_results.scalars().all())
 
     @staticmethod
     async def within_freshness_window(brand_id: str, engine: str) -> list["PromptResult"]:

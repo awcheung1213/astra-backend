@@ -4,6 +4,8 @@ import anthropic
 
 import settings
 from constants.constants import UsageModel
+from objects.cost_event import CostEvent
+from utils.llm_usage import estimate_cost
 from utils.logger import logger
 
 ToolHandler = Callable[[dict], Awaitable[str]]
@@ -39,7 +41,6 @@ class ClaudeAgent:
         self.max_web_searches = max_web_searches
         self.client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
-
     async def agent_turn(
         self,
         messages: list[dict],
@@ -64,7 +65,6 @@ class ClaudeAgent:
             params["tools"] = tools
         return await self.client.messages.create(**params)
 
-
     async def run_agent(
         self,
         system: str,
@@ -72,16 +72,21 @@ class ClaudeAgent:
         tools: list[dict],
         handlers: dict[str, ToolHandler],
         max_iterations: int = AGENT_MAX_ITERATIONS,
+        operation: str | None = None,
+        organization_id: str | None = None,
+        brand_id: str | None = None,
+        task_id: str | None = None,
         on_usage: UsageHook | None = None,
     ) -> str:
         """Run one agent task to completion; returns the final assistant text.
 
-        The loop owns dispatch and stop_reason handling ONLY — everything with
-        a database opinion is injected by the worker task function: handlers
-        that touch the outside world call other adapters, and on_usage receives
-        each turn's usage so the caller writes the cost_event (task/brand
-        attribution) and enforces the task's LIFETIME token budget (raise from
-        on_usage to stop the run). Writes to client sites are never tools: the
+        Passing `operation` (+ org/brand/task ids) writes one cost_events row
+        per turn; omit it to skip metering (e.g. local tinkering without a DB
+        session). The worker task function injects the rest: handlers that
+        touch the outside world call other adapters, and on_usage receives
+        each turn's usage so the caller enforces the task's LIFETIME token
+        budget (raise from on_usage to stop the run). Writes to client sites
+        are never tools: the
         agent proposes (a handler inserts a change_sets row); only the
         change-set engine applies, behind the approval gate (rules 1 and 7).
 
@@ -92,6 +97,19 @@ class ClaudeAgent:
         messages: list[dict] = [{"role": "user", "content": prompt}]
         for iteration in range(1, max_iterations + 1):
             response = await self.agent_turn(messages, system=system, tools=tools)
+            if operation is not None:
+                usage = response.usage
+                await CostEvent.create(
+                    adapter="claude",
+                    operation=operation,
+                    organization_id=organization_id,
+                    brand_id=brand_id,
+                    task_id=task_id,
+                    model=response.model,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    usd=estimate_cost("claude", response.model, usage.input_tokens, usage.output_tokens),
+                )
             if on_usage is not None:
                 await on_usage(response.usage)
 

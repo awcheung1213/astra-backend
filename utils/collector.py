@@ -1,16 +1,23 @@
 from utils.database import Database
+from utils.llm_usage import estimate_cost, summarize_usage
 from objects.batch import Batch
 from adapters.registry import initialize_adapter
 from constants.constants import UsageKind
 import settings
-from schemas.provider_schemas import QueryRequest, LocationContext
+from schemas.provider_schemas import QueryRequest, QueryResult, LocationContext
 from objects.brand import Brand
+from objects.competitor import Competitor
+from objects.competitor_mention import CompetitorMention
 from objects.cost_event import CostEvent
 from objects.prompt import Prompt
 from objects.market import Market
 from objects.prompt_result import PromptResult
 from objects.query_response import QueryResponse
+from schemas.prompt_result_schemas import PromptResultWithCompetitorMentions
 from utils.query_normalization import query_hash
+from utils.logger import logger
+from utils.competitor_matching import build_competitor_regex_patterns, parse_prompt_result_for_competitor_mention_rank
+from utils.response_parsing import parse_prompt_result_for_mention_rank
 
 
 class Collector:
@@ -91,7 +98,14 @@ class Collector:
                 continue
 
             batch_handle = await initialize_adapter(adapter=f"{engine_name}_service").submit_batch(tasks)
-            await Batch.create(provider=batch_handle.provider, batch_id=batch_handle.batch_id, brand_id=None, status=batch_handle.status, request_metadata=request_metadata, kind=UsageKind.EXECUTE_PROMPTS)
+            await Batch.create(
+                provider=batch_handle.provider,
+                batch_id=batch_handle.batch_id,
+                brand_id=None,
+                status=batch_handle.status,
+                request_metadata=request_metadata,
+                kind=UsageKind.EXECUTE_PROMPTS,
+            )
             await Database.session.commit()
 
     @staticmethod
@@ -139,15 +153,147 @@ class Collector:
                 continue
 
             results = await engine.get_batch_results(batch.batch_id)
-            batch.usage_summary = summarize_usage(results)
             if results:
-                await Usage.create(usage_type=UsageType.BATCH, kind=UsageKind(batch.kind), provider=UsageProvider(batch.provider), model=UsageModel(engine.model), batch_id=batch.id, **batch.usage_summary)
-                await CostEvent.create()
+                await CostEvent.create(
+                    adapter=batch.provider,
+                    operation=batch.kind,
+                    brand_id=batch.brand_id,
+                    task_id=batch.task_id,
+                    model=engine.model,
+                    input_tokens=batch.usage_summary["input_tokens"],
+                    output_tokens=batch.usage_summary["output_tokens"],
+                    web_search_count=batch.usage_summary["web_searches"],
+                    usd=estimate_cost(batch.provider, engine.model, batch.usage_summary["input_tokens"], batch.usage_summary["output_tokens"], batch.usage_summary["web_searches"], batch=True),
+                )
             # sentiment -> create prompt results
             if batch.kind == UsageKind.SENTIMENT_ANALYSIS.value:
-                await _ingest_sentiment_batch(batch, results)
+                await Collector._ingest_sentiment_batch(batch, results)
             # execution -> create query_responses -> submit sentiment batch
             else:
                 await _ingest_execution_batch(batch, results)
             await Batch.mark_processed(batch.id, status=status)
             await Database.session.commit()
+
+    @staticmethod
+    async def _ingest_sentiment_batch(batch: Batch, results: list[QueryResult]) -> None:
+        sentiment_batch_outputs: list[tuple[dict, list[str], str]] = []
+        prompt_result_ids_with_mentions: set[str] = set()
+        for result in results:
+            if result.error or result.structured is None:
+                continue
+            meta = batch.request_metadata[result.custom_id]
+            sentiment_batch_outputs.append((result.structured, meta["prompt_result_ids"], meta.get("pack_kind", UsageKind.SENTIMENT_ANALYSIS.value)))
+            prompt_result_ids_with_mentions.update(meta["prompt_result_ids"])
+        sentiment_by_prompt_result_id, competitors_discovered = Collector._collect_sentiment_batch_outputs(sentiment_batch_outputs)
+
+        prompt_results_with_sentiment = [await PromptResult.get(prompt_result_id) for prompt_result_id in prompt_result_ids_with_mentions]
+        in_process = await Collector._prompt_result_ids_in_process()
+
+        # fmt: off
+        silent: list[PromptResult] = [
+            prompt_result for prompt_result in await PromptResult.filter(brand_id=batch.brand_id, contains_sentiment_analysis=False)
+            if prompt_result.id not in prompt_result_ids_with_mentions
+            and prompt_result.id not in in_process
+        ]
+        # fmt: on
+
+        brand = (await Brand.get(batch.brand_id)).model_dump()
+        await Collector._analyze_prompt_results(brand, [*prompt_results_with_sentiment, *silent], sentiment_by_prompt_result_id, competitors_discovered)
+
+    @staticmethod
+    def _collect_sentiment_batch_outputs(responses_with_ids: list[tuple[dict | None, list[str], str]]) -> tuple[dict[str, dict], list[str]]:
+        """Example input: (result.structured, meta["prompt_result_ids"], meta.get("pack_kind", UsageKind.SENTIMENT_ANALYSIS.value))"""
+        sentiment_by_prompt_result_id: dict[str, dict] = {}
+        competitors_discovered: list[str] = []
+        for structured_outputs, prompt_result_ids, pack_kind in responses_with_ids:
+            for prompt_result_id, structured_output in Collector._map_prompt_result_ids_to_structured_outputs(structured_outputs, prompt_result_ids):
+                sentiment_by_prompt_result_id[prompt_result_id] = structured_output
+                if pack_kind == UsageKind.COMPETITOR_DISCOVERY.value:
+                    competitors_discovered.extend(mention["name"] for mention in structured_output.get("competitor_mentions", []))
+        return sentiment_by_prompt_result_id, competitors_discovered
+
+    @staticmethod
+    def _map_prompt_result_ids_to_structured_outputs(structured: dict | None, prompt_result_ids: list[str]) -> list[tuple[str, dict]]:
+        """Map a pack's structured output back to prompt_result ids via the echoed
+        index. Items with a missing/out-of-range index are skipped (a miscounted
+        item fails alone, not the whole pack)."""
+        pairs: list[tuple[str, dict]] = []
+        for item in (structured or {}).get("results", []):
+            index = item.get("index")
+            if isinstance(index, int) and 0 <= index < len(prompt_result_ids):
+                pairs.append((prompt_result_ids[index], item))
+            else:
+                logger.error(f"sentiment pack item with invalid index {index!r} skipped")
+        return pairs
+
+    @staticmethod
+    async def _prompt_result_ids_in_process() -> set[str]:
+        in_process: set[str] = set()
+        for batch in await Batch.unprocessed(kind=UsageKind.SENTIMENT_ANALYSIS):
+            for meta in (batch.request_metadata or {}).values():
+                if isinstance(meta, dict) and "prompt_result_ids" in meta:
+                    in_process.update(meta["prompt_result_ids"])
+        return in_process
+
+    @staticmethod
+    async def _analyze_prompt_results(brand: dict, prompt_results: list[PromptResult], sentiment_by_id: dict[str, dict], competitors_discovered: list[str]) -> dict[str, PromptResultWithCompetitorMentions]:
+        for competitor_name in competitors_discovered:
+            if not Competitor.is_own_brand(brand["name"], competitor_name):
+                await Competitor.upsert(brand_id=brand["id"], name=competitor_name)
+        competitor_regex_patterns = build_competitor_regex_patterns(await Competitor.get_competitors_by_brand_id(brand["id"]))
+        excluded_names = await Competitor.excluded_names(brand["id"])
+
+        prompt_results_by_id: dict[str, PromptResultWithCompetitorMentions] = {}
+        parsed_count = 0
+
+        for prompt_result in prompt_results:
+            sentiment_structured_output = sentiment_by_id.get(prompt_result.id)
+            mention_rank = parse_prompt_result_for_mention_rank(prompt_result.text, [brand["name"]])[brand["name"]]
+
+            if mention_rank is not None:
+                parsed_count += 1
+                position = mention_rank
+                top_3 = mention_rank <= 3
+            elif sentiment_structured_output is not None:
+                position = sentiment_structured_output["brand_mention_position"]
+                top_3 = sentiment_structured_output["top_3_position"]
+            else:
+                position = None
+                top_3 = False
+
+            # fmt: off
+            competitor_mention_ranks = [
+                (name, mention_rank) for name, mention_rank
+                in parse_prompt_result_for_competitor_mention_rank(prompt_result.text, competitor_regex_patterns, exclude=brand["name"])
+                if not Competitor.is_own_brand(brand["name"], name)
+                and Competitor.normalize_name(name) not in excluded_names
+            ]
+            # fmt: on
+
+            prompt_result_with_sentiment = await PromptResult.update(
+                id=prompt_result.id,
+                brand_mention_position=position,
+                positive_sentiment=bool(sentiment_structured_output["positive_sentiment"]) if sentiment_structured_output is not None else False,
+                top_3_position=top_3,
+                competitor_mention_count=len(competitor_mention_ranks),
+            )
+
+            prompt_result_with_competitor_mentions = PromptResultWithCompetitorMentions(
+                **prompt_result_with_sentiment.model_dump(),
+                competitor_mentions=[],
+            )
+
+            for name, mention_rank in competitor_mention_ranks:
+                created_competitor = await Competitor.upsert(brand_id=brand["id"], name=name)
+                result_competitor_mention = await CompetitorMention.create(
+                    prompt_result_id=prompt_result.id,
+                    name=name,
+                    normalized_name=created_competitor.normalized_name,
+                    competitor_id=created_competitor.id,
+                    position=mention_rank,
+                )
+                prompt_result_with_competitor_mentions.competitor_mentions.append(result_competitor_mention)
+
+            prompt_results_by_id[prompt_result_with_competitor_mentions.id] = prompt_result_with_competitor_mentions
+
+        return prompt_results_by_id
