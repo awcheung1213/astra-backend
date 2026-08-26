@@ -29,9 +29,8 @@ _DEFER_SQL = text("SELECT procrastinate_defer_jobs_v1(ARRAY[ROW(:queue, :task_na
 
 async def create_task(
     brand_id: str,
-    type: str,
+    name: str,
     payload: dict | None = None,
-    job_name: str | None = None,
     queue: str = "default",
     priority: int = 0,
     token_budget: int | None = None,
@@ -39,13 +38,11 @@ async def create_task(
 ) -> Task:
     """Create a tasks row + its queue job atomically. Returns the Task.
 
-    job_name defaults to `type` — the procrastinate task registered under that
-    name (worker/tasks/) must exist. Job args carry only ids (JSON-only rule);
-    the task function loads everything else from the tasks row.
+    Job args carry only ids (JSON-only rule); the task function loads everything else from the tasks row.
     """
     session = Database.session
 
-    task = Task(brand_id=brand_id, type=type, payload=payload or {}, priority=priority, token_budget=token_budget)
+    task = Task(brand_id=brand_id, name=name, payload=payload or {}, priority=priority, token_budget=token_budget)
     session.add(task)
     await session.flush()
 
@@ -53,7 +50,7 @@ async def create_task(
         _DEFER_SQL,
         {
             "queue": queue,
-            "task_name": job_name or type,
+            "task_name": name,
             "priority": priority,
             "queueing_lock": queueing_lock,
             "args": json.dumps({"task_id": task.id, "brand_id": brand_id}),

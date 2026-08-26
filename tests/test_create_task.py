@@ -35,7 +35,7 @@ async def test_create_task_commits_row_and_job_together():
     async with ReplicaDatabase().connection(), Database().connection():
         session = Database.session
         brand_id = await _make_brand(session)
-        task = await create_task(brand_id=brand_id, type="site_audit")
+        task = await create_task(brand_id=brand_id, name="site_audit")
         await session.commit()
 
         assert await _task_count(session, task.id) == 1
@@ -46,7 +46,7 @@ async def test_create_task_rolls_back_row_and_job_together():
     async with ReplicaDatabase().connection(), Database().connection():
         session = Database.session
         brand_id = await _make_brand(session)
-        task = await create_task(brand_id=brand_id, type="site_audit")
+        task = await create_task(brand_id=brand_id, name="site_audit")
         await session.rollback()
 
         assert await _task_count(session, task.id) == 0

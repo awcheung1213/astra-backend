@@ -5,6 +5,7 @@ from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
+from exceptions.exceptions import BrandNotFound
 from objects.base_object import BaseObject
 from utils.database import ReplicaDatabase
 
@@ -36,6 +37,13 @@ class Brand(SQLModel, BaseObject, table=True):
 
     onboarded_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def get(id: str) -> "Brand":
+        brand = await ReplicaDatabase.session.get(Brand, id)
+        if not brand:
+            raise BrandNotFound()
+        return brand
 
     @staticmethod
     async def all() -> list["Brand"]:

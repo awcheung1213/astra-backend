@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Column, DateTime, Integer, Numeric, UniqueConstraint, func, select
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func, select
 from sqlmodel import Field, SQLModel
 from utils.database import ReplicaDatabase
 from exceptions.exceptions import MarketNotFound
@@ -34,6 +34,12 @@ class Market(SQLModel, BaseObject, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     city: str
     state: str
+    zip: str | None = Field(default=None, sa_column=Column(String, nullable=True))
+    # NULL = shared row (system/local); set only on adhoc pseudo-markets
+    brand_id: str | None = Field(default=None, sa_column=Column(String, ForeignKey("brands.id", ondelete="CASCADE"), nullable=True))
+    source: str = Field(default=SOURCE_SYSTEM, sa_column=Column(String, nullable=False, server_default=SOURCE_SYSTEM))
+    collection_market_id: str | None = Field(default=None, sa_column=Column(String, ForeignKey("markets.id"), nullable=True))
+    is_active: bool = Field(default=True, sa_column=Column(Boolean, server_default="true", nullable=False))
     population: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
     county_gdp: Decimal | None = Field(default=None, sa_column=Column(Numeric(16, 0), nullable=True))
     census_year: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))

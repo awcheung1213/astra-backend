@@ -7,7 +7,10 @@ out typed per-brand tasks; it never does the work itself (the granularity
 rule — a task = unit of retry and approval, never unit of iteration).
 """
 
+from objects.brand import Brand
+from utils.database import Database, ReplicaDatabase
 from utils.logger import logger
+from utils.task_queue import create_task
 from worker.app import app
 from worker.tasks.collection import poll_batches, submit_prompt_execution_batch
 
@@ -19,7 +22,7 @@ async def schedule_submit_prompt_execution_batch(timestamp: int) -> None:
     logger.info(f"[schedules] schedule_submit_prompt_execution_batch tick ts={timestamp}")
 
 
-@app.periodic(cron="") # hourly
+@app.periodic(cron="")  # hourly
 @app.task(name="schedule_poll_batches", queue="schedules")
 async def schedule_poll_batches(timestamp: int) -> None:
     await poll_batches.defer_async(timestamp=timestamp)
@@ -29,7 +32,13 @@ async def schedule_poll_batches(timestamp: int) -> None:
 @app.periodic(cron="")  # Sundays 00:00 UTC
 @app.task(name="schedule_visibility_run", queue="schedules")
 async def schedule_visibility_run(timestamp: int) -> None:
-    logger.info(f"[schedules] schedule_visibility_run tick ts={timestamp}")
+    async with ReplicaDatabase().connection():
+        async with Database().connection():
+            brands = await Brand.all()
+            for brand in brands:
+                await create_task(brand_id=brand.id, name="visibility_run", queue="visibility")
+            await Database.session.commit()
+    logger.info(f"[schedules] schedule_visibility_run tick ts={timestamp}: fanned out {len(brands)} sweeps")
 
 
 # @app.periodic(cron="")  # Sundays 01:00 UTC

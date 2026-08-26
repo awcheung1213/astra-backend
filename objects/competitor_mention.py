@@ -41,6 +41,13 @@ class CompetitorMention(SQLModel, BaseObject, table=True):
         return list(rows.scalars().all())
 
     @staticmethod
+    async def by_prompt_result_ids(prompt_result_ids: list[str]) -> list["CompetitorMention"]:
+        if not prompt_result_ids:
+            return []
+        rows = await ReplicaDatabase.session.execute(select(CompetitorMention).where(CompetitorMention.prompt_result_id.in_(prompt_result_ids)))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
     async def create(
         prompt_result_id: str,
         name: str,
