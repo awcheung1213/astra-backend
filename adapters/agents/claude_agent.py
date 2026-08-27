@@ -1,3 +1,20 @@
+"""One agent program; each role is config (design doc, Level 2). The persona
+half of that config lives in utils/agent_prompts — pick a role with run_role:
+
+    from adapters.agents.claude_agent import ClaudeAgent
+    from utils.agent_prompts import ROLE_ANALYST
+
+    diagnosis = await ClaudeAgent().run_role(
+        ROLE_ANALYST,
+        prompt=f"Brand: {brand.name}. Here are the metrics and the change ledger: ...",
+        tools=[GET_METRICS_TOOL, GET_CHANGE_LEDGER_TOOL],
+        handlers={"get_metrics": get_metrics, "get_change_ledger": get_change_ledger},
+        operation="diagnosis", brand_id=brand.id, task_id=task.id,
+    )
+
+The system prompt stays byte-identical per role (cache_control makes repeat
+turns bill at ~10%); everything brand- and task-specific rides `prompt`."""
+
 from typing import Any, Awaitable, Callable
 
 import anthropic
@@ -5,6 +22,7 @@ import anthropic
 import settings
 from constants.constants import UsageModel
 from objects.cost_event import CostEvent
+from utils.agent_prompts import system_prompt_for
 from utils.llm_usage import estimate_cost
 from utils.logger import logger
 
@@ -64,6 +82,18 @@ class ClaudeAgent:
         if tools:
             params["tools"] = tools
         return await self.client.messages.create(**params)
+
+    async def run_role(
+        self,
+        role: str,
+        prompt: str,
+        tools: list[dict],
+        handlers: dict[str, ToolHandler],
+        **run_agent_kwargs,
+    ) -> str:
+        """run_agent with the role's system prompt (utils/agent_prompts) —
+        the normal entry point for worker runners. KeyError on unknown role."""
+        return await self.run_agent(system=system_prompt_for(role), prompt=prompt, tools=tools, handlers=handlers, **run_agent_kwargs)
 
     async def run_agent(
         self,
