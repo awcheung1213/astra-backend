@@ -221,8 +221,8 @@ async def run_site_audit(brand_id: str) -> dict:
     detected_findings = await _crawl(brand.website_url)
 
     open_findings = await Finding.open_for_brand(brand_id)
-    open_finding_by_key = {finding_key(f.kind, f.detail): f for f in open_findings if f.kind in AUDIT_KINDS}
-    detected_finding_keys = {finding_key(d["kind"], d["detail"]) for d in detected_findings}
+    open_finding_by_key = {finding_key(open_finding.kind, open_finding.detail): open_finding for open_finding in open_findings if open_finding.kind in AUDIT_KINDS}
+    detected_finding_keys = {finding_key(detected["kind"], detected["detail"]) for detected in detected_findings}
 
     created_count = 0
     for detected in detected_findings:

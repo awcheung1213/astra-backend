@@ -111,9 +111,9 @@ async def fetch_place_populations(web: httpx.AsyncClient) -> dict[str, dict]:
     response = await web.get(POPULATION_URL, params={"get": "NAME,B01003_001E", "for": "place:*", "in": "state:*", "key": CENSUS_API_KEY})
     response.raise_for_status()
 
-    header_dropped = response.json()[1:]
+    place_rows = response.json()[1:]  # first row is the column header
     places: dict[str, dict] = {}
-    for name, population, state_fips, place_fips in header_dropped:
+    for name, population, state_fips, place_fips in place_rows:
         state = STATE_ABBREV_BY_FIPS.get(state_fips)
         if not state or not population or int(population) <= 0:
             continue
@@ -130,17 +130,17 @@ async def fetch_place_to_county_map(web: httpx.AsyncClient) -> dict[str, str]:
 
     lines = response.text.splitlines()
     header = lines[0].split("|")
-    column = {column_name: index for index, column_name in enumerate(header)}
-    required = {"STATEFP", "PLACEFP", "COUNTYFP"}
-    if not required.issubset(column):
-        raise SystemExit(f"place-to-county file header changed — expected {required}, got: {header}")
+    column_index_by_name = {column_name: index for index, column_name in enumerate(header)}
+    required_columns = {"STATEFP", "PLACEFP", "COUNTYFP"}
+    if not required_columns.issubset(column_index_by_name):
+        raise SystemExit(f"place-to-county file header changed — expected {required_columns}, got: {header}")
 
     county_by_place: dict[str, str] = {}
     for line in lines[1:]:
         fields = line.split("|")
-        place_geoid = fields[column["STATEFP"]] + fields[column["PLACEFP"]]
+        place_geoid = fields[column_index_by_name["STATEFP"]] + fields[column_index_by_name["PLACEFP"]]
         if place_geoid not in county_by_place:  # first listed county wins
-            county_by_place[place_geoid] = fields[column["STATEFP"]] + fields[column["COUNTYFP"]]
+            county_by_place[place_geoid] = fields[column_index_by_name["STATEFP"]] + fields[column_index_by_name["COUNTYFP"]]
     return county_by_place
 
 
@@ -178,7 +178,7 @@ LAST_WEEK_OVERALL_SCORE = 0.35
 CLIENT_TASK_BACKDATE_DAYS = 5  # older than CHASE_AFTER_DAYS (3) -> overdue
 
 
-async def seed_test_brand_world(session) -> None:
+async def seed_test_brand_with_history(session) -> None:
     # ---- step 2: the organization -------------------------------------
     test_organization = Organization(name=TEST_ORGANIZATION_NAME)
     session.add(test_organization)
@@ -253,7 +253,7 @@ async def seed() -> None:
             if organization_already_seeded:
                 print(f"2-8. '{TEST_ORGANIZATION_NAME}' already exists — skipping")
             else:
-                await seed_test_brand_world(session)
+                await seed_test_brand_with_history(session)
 
             await session.commit()
 

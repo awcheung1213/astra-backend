@@ -136,6 +136,7 @@ COMPETITOR_DISCOVERY_SCHEMA = {
 # BATCH SUBMISSION
 ##############################
 
+
 async def run_submit_prompt_execution_batch() -> None:
     in_process = await _in_process_cells()
     brands = await Brand.all()
@@ -145,7 +146,7 @@ async def run_submit_prompt_execution_batch() -> None:
         active_prompts = [prompt for prompt in await Prompt.by_brand(brand_id=brand.id) if prompt.is_active]
         markets = await Market.by_brand(brand_id=brand.id, brand_footprint=brand.footprint)
         cells = set((prompt.id, market.id) for prompt in active_prompts for market in markets)
-        hash_by_prompt_id = {prompt.id: dict(hash=query_hash(prompt.text), text=prompt.text) for prompt in active_prompts}
+        query_hash_and_text_by_prompt_id = {prompt.id: dict(hash=query_hash(prompt.text), text=prompt.text) for prompt in active_prompts}
 
         for engine_name in settings.ACTIVE_ENGINES:
             engine_queue = queue_for_llm[engine_name]
@@ -154,22 +155,22 @@ async def run_submit_prompt_execution_batch() -> None:
             prompt_result_cells_within_freshness_window = set((prompt_result.prompt_id, prompt_result.market_id) for prompt_result in prompt_results_within_freshness_window)
 
             stale_cells_by_id = cells - prompt_result_cells_within_freshness_window
-            stale_cells_by_hashes = set((hash_by_prompt_id[prompt_id]["hash"], market_id) for prompt_id, market_id in stale_cells_by_id)
+            stale_cells_by_hashes = set((query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id) for prompt_id, market_id in stale_cells_by_id)
 
             query_responses_within_freshness_window = await QueryResponse.within_freshness_window(stale_cells=stale_cells_by_hashes, engine=engine_name)
 
             query_response_by_cell = {(query_response.query_hash, query_response.market_id): query_response for query_response in query_responses_within_freshness_window}
             for prompt_id, market_id in stale_cells_by_id:
-                query_response = query_response_by_cell.get((hash_by_prompt_id[prompt_id]["hash"], market_id))
+                query_response = query_response_by_cell.get((query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id))
                 if query_response is not None:
                     continue
-                if (hash_by_prompt_id[prompt_id]["hash"], market_id) in in_process.get(engine_name, set()):
+                if (query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id) in in_process.get(engine_name, set()):
                     continue
-                if (hash_by_prompt_id[prompt_id]["hash"], market_id) not in engine_queue:
-                    engine_queue[(hash_by_prompt_id[prompt_id]["hash"], market_id)] = dict(
+                if (query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id) not in engine_queue:
+                    engine_queue[(query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id)] = dict(
                         prompt_id=prompt_id,
                         market_id=market_id,
-                        query_text=hash_by_prompt_id[prompt_id]["text"],
+                        query_text=query_hash_and_text_by_prompt_id[prompt_id]["text"],
                         subscribers=[
                             dict(
                                 brand_id=brand.id,
@@ -178,7 +179,7 @@ async def run_submit_prompt_execution_batch() -> None:
                         ],
                     )
                 else:
-                    engine_queue[(hash_by_prompt_id[prompt_id]["hash"], market_id)]["subscribers"].append(
+                    engine_queue[(query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id)]["subscribers"].append(
                         dict(
                             brand_id=brand.id,
                             prompt_id=prompt_id,
@@ -188,25 +189,25 @@ async def run_submit_prompt_execution_batch() -> None:
     markets_by_id = {market.id: market for market in await Market.all()}
 
     for engine_name in settings.ACTIVE_ENGINES:
-        tasks: list[QueryRequest] = []
+        query_requests: list[QueryRequest] = []
         request_metadata: dict = {}
-        for (hash, market_id), cell in queue_for_llm[engine_name].items():
+        for (query_hash_value, market_id), cell in queue_for_llm[engine_name].items():
             market = markets_by_id.get(market_id)
             location = LocationContext(city=market.city, state=market.state, zip=market.zip) if market.source != "national" else None
-            custom_id = str(len(tasks))
+            custom_id = str(len(query_requests))
             request_metadata[custom_id] = {
-                "query_hash": hash,
+                "query_hash": query_hash_value,
                 "query_text": cell["query_text"],
                 "prompt_id": cell["prompt_id"],
                 "market_id": market.id,
                 "subscribers": cell["subscribers"],
             }
-            tasks.append(QueryRequest(custom_id=custom_id, prompt=cell["query_text"], location=location))
+            query_requests.append(QueryRequest(custom_id=custom_id, prompt=cell["query_text"], location=location))
 
-        if not tasks:
+        if not query_requests:
             continue
 
-        batch_handle = await initialize_adapter(adapter=f"{engine_name}_service").submit_batch(tasks)
+        batch_handle = await initialize_adapter(adapter=f"{engine_name}_service").submit_batch(query_requests)
         await Batch.create(
             provider=batch_handle.provider,
             batch_id=batch_handle.batch_id,
@@ -217,7 +218,7 @@ async def run_submit_prompt_execution_batch() -> None:
         )
         await Database.session.commit()
 
-@staticmethod
+
 async def _in_process_cells() -> dict[str, set[tuple[str, str]]]:
     in_process: dict[str, set[tuple[str, str]]] = {}
     for batch in await Batch.unprocessed():
@@ -225,15 +226,17 @@ async def _in_process_cells() -> dict[str, set[tuple[str, str]]]:
             continue
         metadata = batch.request_metadata or {}
         batch_engine = batch.provider
-        for key, meta in metadata.items():
-            if key.startswith("__") or not isinstance(meta, dict) or "market_id" not in meta:
+        for custom_id, result_metadata in metadata.items():
+            if custom_id.startswith("__") or not isinstance(result_metadata, dict) or "market_id" not in result_metadata:
                 continue
-            in_process.setdefault(batch_engine, set()).add((meta["query_hash"], meta["market_id"]))
+            in_process.setdefault(batch_engine, set()).add((result_metadata["query_hash"], result_metadata["market_id"]))
     return in_process
+
 
 ##############################
 # BATCH POLL
 ##############################
+
 
 async def run_poll_batches() -> None:
     """
@@ -283,16 +286,16 @@ async def run_poll_batches() -> None:
         await Batch.mark_processed(batch.id, status=status)
         await Database.session.commit()
 
-@staticmethod
+
 async def ingest_sentiment_batch(batch: Batch, results: list[QueryResult]) -> None:
     sentiment_batch_outputs: list[tuple[dict, list[str], str]] = []
     prompt_result_ids_with_mentions: set[str] = set()
     for result in results:
         if result.error or result.structured is None:
             continue
-        meta = batch.request_metadata[result.custom_id]
-        sentiment_batch_outputs.append((result.structured, meta["prompt_result_ids"], meta.get("pack_kind", UsageKind.SENTIMENT_ANALYSIS.value)))
-        prompt_result_ids_with_mentions.update(meta["prompt_result_ids"])
+        result_metadata = batch.request_metadata[result.custom_id]
+        sentiment_batch_outputs.append((result.structured, result_metadata["prompt_result_ids"], result_metadata.get("pack_kind", UsageKind.SENTIMENT_ANALYSIS.value)))
+        prompt_result_ids_with_mentions.update(result_metadata["prompt_result_ids"])
     sentiment_by_prompt_result_id, competitors_discovered = _collect_sentiment_batch_outputs(sentiment_batch_outputs)
 
     prompt_results_with_sentiment = [await PromptResult.get(prompt_result_id) for prompt_result_id in prompt_result_ids_with_mentions]
@@ -309,7 +312,7 @@ async def ingest_sentiment_batch(batch: Batch, results: list[QueryResult]) -> No
     brand = (await Brand.get(batch.brand_id)).model_dump()
     await _analyze_prompt_results(brand, [*prompt_results_with_sentiment, *silent], sentiment_by_prompt_result_id, competitors_discovered)
 
-@staticmethod
+
 def _collect_sentiment_batch_outputs(responses_with_ids: list[tuple[dict | None, list[str], str]]) -> tuple[dict[str, dict], list[str]]:
     """Example input: (result.structured, meta["prompt_result_ids"], meta.get("pack_kind", UsageKind.SENTIMENT_ANALYSIS.value))"""
     sentiment_by_prompt_result_id: dict[str, dict] = {}
@@ -321,30 +324,30 @@ def _collect_sentiment_batch_outputs(responses_with_ids: list[tuple[dict | None,
                 competitors_discovered.extend(mention["name"] for mention in structured_output.get("competitor_mentions", []))
     return sentiment_by_prompt_result_id, competitors_discovered
 
-@staticmethod
+
 def _map_prompt_result_ids_to_structured_outputs(structured: dict | None, prompt_result_ids: list[str]) -> list[tuple[str, dict]]:
     """Map a pack's structured output back to prompt_result ids via the echoed
     index. Items with a missing/out-of-range index are skipped (a miscounted
     item fails alone, not the whole pack)."""
     pairs: list[tuple[str, dict]] = []
-    for item in (structured or {}).get("results", []):
-        index = item.get("index")
+    for pack_result in (structured or {}).get("results", []):
+        index = pack_result.get("index")
         if isinstance(index, int) and 0 <= index < len(prompt_result_ids):
-            pairs.append((prompt_result_ids[index], item))
+            pairs.append((prompt_result_ids[index], pack_result))
         else:
             logger.error(f"sentiment pack item with invalid index {index!r} skipped")
     return pairs
 
-@staticmethod
+
 async def _prompt_result_ids_in_process() -> set[str]:
     in_process: set[str] = set()
     for batch in await Batch.unprocessed(kind=UsageKind.SENTIMENT_ANALYSIS):
-        for meta in (batch.request_metadata or {}).values():
-            if isinstance(meta, dict) and "prompt_result_ids" in meta:
-                in_process.update(meta["prompt_result_ids"])
+        for result_metadata in (batch.request_metadata or {}).values():
+            if isinstance(result_metadata, dict) and "prompt_result_ids" in result_metadata:
+                in_process.update(result_metadata["prompt_result_ids"])
     return in_process
 
-@staticmethod
+
 async def _analyze_prompt_results(brand: dict, prompt_results: list[PromptResult], sentiment_by_id: dict[str, dict], competitors_discovered: list[str]) -> dict[str, PromptResultWithCompetitorMentions]:
     for competitor_name in competitors_discovered:
         if not Competitor.is_own_brand(brand["name"], competitor_name):
@@ -404,7 +407,7 @@ async def _analyze_prompt_results(brand: dict, prompt_results: list[PromptResult
 
     return prompt_results_by_id
 
-@staticmethod
+
 async def ingest_execution_batch(batch: Batch, results: list[QueryResult]) -> None:
     from dataclasses import asdict
 
@@ -412,18 +415,18 @@ async def ingest_execution_batch(batch: Batch, results: list[QueryResult]) -> No
     for result in results:
         if result.error:
             continue
-        meta = batch.request_metadata[result.custom_id]
-        market = await Market.get(meta["market_id"])
+        result_metadata = batch.request_metadata[result.custom_id]
+        market = await Market.get(result_metadata["market_id"])
         query_response = await QueryResponse.create(
-            query_hash=meta["query_hash"],
-            query_text=meta["query_text"],
+            query_hash=result_metadata["query_hash"],
+            query_text=result_metadata["query_text"],
             market=market,
             engine=batch.provider,
             text=result.text,
             raw=result.raw or {},
             citations=[asdict(citation) for citation in (result.citations or [])],
         )
-        for subscriber in meta["subscribers"]:
+        for subscriber in result_metadata["subscribers"]:
             brand = (await Brand.get(subscriber["brand_id"])).model_dump()
             await _create_prompt_result_from_query_response(brand, subscriber["prompt_id"], query_response, market_id=market.id)
             subscribed_brand_ids.add(subscriber["brand_id"])
@@ -432,7 +435,7 @@ async def ingest_execution_batch(batch: Batch, results: list[QueryResult]) -> No
         brand = (await Brand.get(subscribed_brand_id)).model_dump()
         await _submit_analysis_batch(brand)
 
-@staticmethod
+
 async def _create_prompt_result_from_query_response(brand: dict, prompt_id: str, query_response: QueryResponse, market_id: str | None = None) -> PromptResult:
     brand_name = brand["name"].lower()
     citations = query_response.citations or []
@@ -449,10 +452,10 @@ async def _create_prompt_result_from_query_response(brand: dict, prompt_id: str,
     )
     unique_citations: set[tuple[str, str]] = set()
     for citation in citations:
-        key = (citation.get("url") or "", citation.get("cited_text") or "")
-        if key in unique_citations:
+        citation_identity = (citation.get("url") or "", citation.get("cited_text") or "")
+        if citation_identity in unique_citations:
             continue
-        unique_citations.add(key)
+        unique_citations.add(citation_identity)
         await Citation.create(
             brand_id=brand["id"],
             prompt_id=prompt_id,
@@ -465,7 +468,7 @@ async def _create_prompt_result_from_query_response(brand: dict, prompt_id: str,
         )
     return prompt_result
 
-@staticmethod
+
 async def _submit_analysis_batch(brand: dict) -> None:
     in_process = await _prompt_result_ids_in_process()
 
@@ -480,7 +483,7 @@ async def _submit_analysis_batch(brand: dict) -> None:
         await _analyze_prompt_results(brand, prompt_results_without_brand_mentions, {}, [])
 
     # multiple prompt results analyzed in a single response
-    tasks = []
+    query_requests: list[QueryRequest] = []
     request_metadata: dict = {}
 
     for prompt_results, pack_kind, system_prompt, schema in (
@@ -488,9 +491,9 @@ async def _submit_analysis_batch(brand: dict) -> None:
         (prompt_results_for_competitor_discovery, UsageKind.COMPETITOR_DISCOVERY.value, COMPETITOR_DISCOVERY_SYSTEM_PROMPT, COMPETITOR_DISCOVERY_SCHEMA),
     ):
         for chunk in _chunk_prompt_results(prompt_results):
-            custom_id = str(len(tasks))
+            custom_id = str(len(query_requests))
             request_metadata[custom_id] = {"brand_id": brand["id"], "prompt_result_ids": [prompt_result.id for prompt_result in chunk], "pack_kind": pack_kind}
-            tasks.append(
+            query_requests.append(
                 QueryRequest(
                     custom_id=custom_id,
                     prompt=_build_sentiment_analysis_prompt(brand["name"], chunk),
@@ -500,19 +503,19 @@ async def _submit_analysis_batch(brand: dict) -> None:
                 )
             )
 
-    if not tasks:
+    if not query_requests:
         logger.info(f"brand {brand['id']} has no unanalyzed prompt results; skipping sentiment batch submission")
         return
 
-    handle = await ClaudeService(use_web_search=False, max_tokens=SENTIMENT_PACK_MAX_TOKENS).submit_batch(tasks)
+    handle = await ClaudeService(use_web_search=False, max_tokens=SENTIMENT_PACK_MAX_TOKENS).submit_batch(query_requests)
     await Batch.create(provider=handle.provider, batch_id=handle.batch_id, brand_id=brand["id"], status=handle.status, request_metadata=request_metadata, kind=UsageKind.SENTIMENT_ANALYSIS)
 
-@staticmethod
+
 def _is_discovery_sample(prompt_result_id: str) -> bool:
     """Deterministic sampling: ~5% get LLM competitor discovery"""
     return int(hashlib.md5(prompt_result_id.encode()).hexdigest(), 16) % DISCOVERY_SAMPLE_MODULO == 0
 
-@staticmethod
+
 def _categorize_into_sentiment_or_competitor_discovery_analysis(prompt_results: list[PromptResult]) -> tuple[list[PromptResult], list[PromptResult]]:
     prompts_for_competitor_discovery = [prompt_result for prompt_result in prompt_results if _is_discovery_sample(prompt_result.id)]
     prompts_for_competitor_discovery_ids = {prompt_result.id for prompt_result in prompts_for_competitor_discovery}
@@ -520,7 +523,7 @@ def _categorize_into_sentiment_or_competitor_discovery_analysis(prompt_results: 
     prompts_for_sentiment_analysis = [prompt_result for prompt_result in prompt_results if prompt_result.brand_mentioned and prompt_result.id not in prompts_for_competitor_discovery_ids]
     return prompts_for_sentiment_analysis, prompts_for_competitor_discovery
 
-@staticmethod
+
 def _chunk_prompt_results(prompt_results: list[PromptResult]) -> list[list[PromptResult]]:
     packs = []
     for start in range(0, len(prompt_results), SENTIMENT_PACK_SIZE):
@@ -528,7 +531,7 @@ def _chunk_prompt_results(prompt_results: list[PromptResult]) -> list[list[Promp
         packs.append(prompt_results[start:end])
     return packs
 
-@staticmethod
+
 def _build_sentiment_analysis_prompt(brand_name: str, prompt_results: list[PromptResult]) -> str:
     sections = [f"Brand: {brand_name}"]
     for index, prompt_result in enumerate(prompt_results):

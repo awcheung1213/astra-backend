@@ -32,7 +32,6 @@ async def visibility_run(task_id: str, brand_id: str) -> None:
         await run_visibility_sweep(brand_id)
 
 
-
 # framework 1.0.0 weights — unconditional rates over all answers, sum to 1.0
 WEIGHT_DETECTION = 0.40
 WEIGHT_SHARE_OF_VOICE = 0.25
@@ -115,7 +114,7 @@ def hydrate_prompt_result(result: PromptResult, mentions: list[CompetitorMention
         competitor_mention_count=len(mentions),
         query_response_id=result.query_response_id,
         created_at=result.created_at,
-        competitor_mentions=[CompetitorMentionSchema(id=m.id, competitor_id=m.competitor_id, position=m.position, created_at=m.created_at) for m in mentions],
+        competitor_mentions=[CompetitorMentionSchema(id=mention.id, competitor_id=mention.competitor_id, position=mention.position, created_at=mention.created_at) for mention in mentions],
     )
 
 
