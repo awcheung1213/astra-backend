@@ -7,7 +7,7 @@ async def weekly_brief(task_id: str, brand_id: str) -> None:
     """Pulse — the Account Manager's Monday Brief: serif voice over
     assembler-supplied facts (last week's movement, what shipped, what's
     waiting on the client). Emits a `brief` artifact; facts never
-    hallucinated. Logic lands in utils/tasks/briefs.py."""
+    hallucinated."""
     async with task_lifecycle(task_id):
         # TODO: assemble facts -> AM agent -> Artifact(type="brief")
         pass

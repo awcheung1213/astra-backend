@@ -6,7 +6,7 @@ from worker.app import app
 async def gbp_management(task_id: str, brand_id: str) -> None:
     """#14 — weekly GBP touches: posts + Q&A in brand voice, behind the
     Reputation tone gate. (Review REPLIES are not here — they arrive via the
-    new-review webhook as review_response tasks.) Logic lands in utils/tasks/reputation.py."""
+    new-review webhook as review_response tasks.)"""
     async with task_lifecycle(task_id):
         # TODO: draft posts/Q&A -> Artifact behind tone gate -> GBP via adapter
         pass

@@ -13,7 +13,7 @@ SCAN_UNLINKED_MENTIONS = "unlinked_mentions"  # #22 — weekly reclamation
 async def outreach_scout(task_id: str, brand_id: str) -> None:
     """#13/#20/#21/#22 — the Outreach scout: finds & drafts, NEVER sends.
     Emits pitch + talking-point artifacts routed to the human sender —
-    sending stays outside the system by design. Logic lands in utils/tasks/outreach.py."""
+    sending stays outside the system by design."""
     async with task_lifecycle(task_id) as task:
         scan = (task.payload or {}).get("scan", "")
         # TODO: dispatch on `scan` -> scout agent -> Artifact(type="pitch")

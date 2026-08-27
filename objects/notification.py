@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils.database import Database
 
 KIND_WIN = "win"
 KIND_ALERT = "alert"
@@ -28,3 +29,19 @@ class Notification(SQLModel, BaseObject, table=True):
     channels_sent: list = Field(default_factory=list, sa_column=Column(JSONB, nullable=False, server_default="[]"))
     read_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def create(
+        organization_id: str,
+        kind: str,
+        title: str,
+        body: str | None = None,
+        urgency: str = URGENCY_NORMAL,
+        link_ref: str | None = None,
+    ) -> "Notification":
+        notification = Notification(organization_id=organization_id, kind=kind, title=title, body=body, urgency=urgency, link_ref=link_ref)
+        session = Database.session
+        session.add(notification)
+        await session.flush()
+        await session.refresh(notification)
+        return notification

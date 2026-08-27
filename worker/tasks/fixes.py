@@ -8,7 +8,7 @@ async def technical_fix(task_id: str, brand_id: str) -> None:
     CHAINED, never cron: produced by the site_audit runner, one per new
     actionable finding (payload carries finding_id). Emits a change_proposal
     artifact behind the approval gate; odd cases escalate to the Technical
-    agent as technical_judgment. Logic lands in utils/tasks/fixes.py."""
+    agent as technical_judgment."""
     async with task_lifecycle(task_id) as task:
         finding_id = (task.payload or {}).get("finding_id", "")
         # TODO: load the finding -> its kind's fix generator ->

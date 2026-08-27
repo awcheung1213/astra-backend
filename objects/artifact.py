@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils.database import Database
 
 STATUS_PENDING_REVIEW = "pending_review"
 STATUS_APPROVED = "approved"
@@ -28,3 +29,19 @@ class Artifact(SQLModel, BaseObject, table=True):
     reviewed_by: str | None = Field(default=None, sa_column=Column(String, nullable=True))
     reviewed_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def create(
+        task_id: str,
+        brand_id: str,
+        type: str,
+        content: dict,
+        evidence: dict | None = None,
+        status: str = STATUS_PENDING_REVIEW,
+    ) -> "Artifact":
+        artifact = Artifact(task_id=task_id, brand_id=brand_id, type=type, content=content, evidence=evidence or {}, status=status)
+        session = Database.session
+        session.add(artifact)
+        await session.flush()
+        await session.refresh(artifact)
+        return artifact
