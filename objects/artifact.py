@@ -1,12 +1,12 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, func
+from sqlalchemy import Column, DateTime, ForeignKey, String, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
-from utils.database import Database
+from utils.database import Database, ReplicaDatabase
 
 STATUS_PENDING_REVIEW = "pending_review"
 STATUS_APPROVED = "approved"
@@ -45,3 +45,13 @@ class Artifact(SQLModel, BaseObject, table=True):
         await session.flush()
         await session.refresh(artifact)
         return artifact
+
+    @staticmethod
+    async def latest(brand_id: str, type: str, statuses: list[str] | None = None) -> "Artifact | None":
+        """Newest artifact of a type for a brand, optionally filtered to given
+        statuses (e.g. only approved plans)."""
+        statement = select(Artifact).where(Artifact.brand_id == brand_id).where(Artifact.type == type).order_by(Artifact.created_at.desc()).limit(1)  # type: ignore
+        if statuses:
+            statement = statement.where(Artifact.status.in_(statuses))  # type: ignore
+        rows = await ReplicaDatabase.session.execute(statement)
+        return rows.scalars().first()
