@@ -1,11 +1,12 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils.database import ReplicaDatabase
 
 STATUS_PENDING = "pending"
 STATUS_CONNECTED = "connected"
@@ -27,3 +28,14 @@ class Site(SQLModel, BaseObject, table=True):
     connected_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     last_verified_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def connected() -> list["Site"]:
+        """Only connected sites receive audits/change sets."""
+        rows = await ReplicaDatabase.session.execute(select(Site).where(Site.status == STATUS_CONNECTED))
+        return list(rows.scalars().all())
+
+    @staticmethod
+    async def by_brand(brand_id: str) -> "Site | None":
+        rows = await ReplicaDatabase.session.execute(select(Site).where(Site.brand_id == brand_id).where(Site.status == STATUS_CONNECTED))
+        return rows.scalars().first()

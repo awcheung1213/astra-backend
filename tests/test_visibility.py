@@ -5,7 +5,7 @@ from datetime import datetime
 import pytest
 
 from schemas.prompt_result_schemas import PromptResultWithCompetitorMentions
-from utils.visibility import citation_rate, detection_rate, overall_score, positive_rate, share_of_voice, top3_rate, week_of_today
+from utils.tasks.visibility import citation_rate, detection_rate, overall_score, positive_rate, share_of_voice, top3_rate, week_of_today
 
 
 def result(mentioned=False, positive=None, rank=None, cited=False, competitor_mentions=0, market_id="m1"):

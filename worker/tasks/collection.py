@@ -1,7 +1,7 @@
-from utils.logger import logger
-from worker.app import app
-from utils.collector import Collector
 from utils.database import Database, ReplicaDatabase
+from utils.logger import logger
+from utils.tasks.collector import Collector
+from worker.app import app
 
 
 @app.task(name="submit_prompt_execution_batch", queue="collection")
@@ -11,7 +11,7 @@ async def submit_prompt_execution_batch() -> None:
     async with ReplicaDatabase().connection():
         async with Database().connection():
             await Collector.submit_prompt_execution_batch()
-    
+
     logger.info(f"[collection] submit_prompt_execution_batch - end", priority="medium")
 
 
@@ -20,7 +20,7 @@ async def poll_batches() -> None:
     logger.info(f"[collection] poll_batches - start", priority="medium")
 
     async with ReplicaDatabase().connection():
-            async with Database().connection():
-                await Collector.poll_batches()
+        async with Database().connection():
+            await Collector.poll_batches()
 
     logger.info(f"[collection] poll_batches - end", priority="medium")

@@ -42,6 +42,13 @@ class Task(SQLModel, BaseObject, table=True):
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
 
     @staticmethod
+    async def get(id: str) -> "Task":
+        task = await Database.session.get(Task, id)
+        if task is None:
+            raise TaskNotFound()
+        return task
+
+    @staticmethod
     async def update_status(id: str, status: str) -> None:
         task = await Database.session.get(Task, id)
         if task is None:

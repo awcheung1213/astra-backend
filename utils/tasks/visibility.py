@@ -66,13 +66,7 @@ def citation_rate(results: list[PromptResultWithCompetitorMentions]) -> float:
 
 
 def overall_score(results: list[PromptResultWithCompetitorMentions]) -> float:
-    return (
-        detection_rate(results) * WEIGHT_DETECTION
-        + share_of_voice(results) * WEIGHT_SHARE_OF_VOICE
-        + positive_rate(results) * WEIGHT_POSITIVE_RATE
-        + top3_rate(results) * WEIGHT_TOP3_RATE
-        + citation_rate(results) * WEIGHT_CITATION_RATE
-    )
+    return detection_rate(results) * WEIGHT_DETECTION + share_of_voice(results) * WEIGHT_SHARE_OF_VOICE + positive_rate(results) * WEIGHT_POSITIVE_RATE + top3_rate(results) * WEIGHT_TOP3_RATE + citation_rate(results) * WEIGHT_CITATION_RATE
 
 
 ##############################
@@ -111,22 +105,22 @@ def hydrate_prompt_result(result: PromptResult, mentions: list[CompetitorMention
     )
 
 
-def _group_by_market(scored: list[PromptResultWithCompetitorMentions], national_market_ids: set[str]) -> dict[str, list[PromptResultWithCompetitorMentions]]:
+def _group_by_market(scored_results: list[PromptResultWithCompetitorMentions], national_market_ids: set[str]) -> dict[str, list[PromptResultWithCompetitorMentions]]:
     """Geo markets each get their own bucket; national (location-independent)
     results ride along in EVERY geo bucket. A brand with only national results
     gets a single national bucket so it still scores."""
-    national_results = [result for result in scored if result.market_id in national_market_ids]
-    by_market: dict[str, list[PromptResultWithCompetitorMentions]] = {}
-    for result in scored:
+    national_results = [result for result in scored_results if result.market_id in national_market_ids]
+    results_by_market: dict[str, list[PromptResultWithCompetitorMentions]] = {}
+    for result in scored_results:
         if result.market_id in national_market_ids:
             continue
-        by_market.setdefault(result.market_id, []).append(result)
-    if not by_market and national_results:
-        by_market[national_results[0].market_id] = list(national_results)
+        results_by_market.setdefault(result.market_id, []).append(result)
+    if not results_by_market and national_results:
+        results_by_market[national_results[0].market_id] = list(national_results)
     else:
-        for market_results in by_market.values():
+        for market_results in results_by_market.values():
             market_results.extend(national_results)
-    return by_market
+    return results_by_market
 
 
 async def run_visibility_sweep(brand_id: str) -> VisibilityRun | None:
@@ -140,14 +134,14 @@ async def run_visibility_sweep(brand_id: str) -> VisibilityRun | None:
         logger.info(f"[visibility] brand {brand.id} has no analyzed results; skipping sweep")
         return None
 
-    mentions_by_result: dict[str, list[CompetitorMention]] = {}
+    mentions_by_result_id: dict[str, list[CompetitorMention]] = {}
     for mention in await CompetitorMention.by_prompt_result_ids([result.id for result in prompt_results]):
-        mentions_by_result.setdefault(mention.prompt_result_id, []).append(mention)
-    scored = [hydrate_prompt_result(result, mentions_by_result.get(result.id, [])) for result in prompt_results]
+        mentions_by_result_id.setdefault(mention.prompt_result_id, []).append(mention)
+    scored_results = [hydrate_prompt_result(result, mentions_by_result_id.get(result.id, [])) for result in prompt_results]
 
     markets_by_id = {market.id: market for market in await Market.all()}
-    national_market_ids = {market_id for market_id in {result.market_id for result in scored} if markets_by_id.get(market_id) and markets_by_id[market_id].source == SOURCE_NATIONAL}
-    by_market = _group_by_market(scored, national_market_ids)
+    national_market_ids = {market_id for market_id in {result.market_id for result in scored_results} if markets_by_id.get(market_id) and markets_by_id[market_id].source == SOURCE_NATIONAL}
+    results_by_market = _group_by_market(scored_results, national_market_ids)
 
     run = await VisibilityRun.get_or_create_for_week(brand.id, week_of_today())
     if run.status == STATUS_DONE:
@@ -155,18 +149,18 @@ async def run_visibility_sweep(brand_id: str) -> VisibilityRun | None:
         return run
 
     await VisibilityRunMarket.delete_for_run(run.id)
-    for market_id, market_results in by_market.items():
+    for market_id, market_results in results_by_market.items():
         await VisibilityRunMarket.create(visibility_run_id=run.id, market_id=market_id, overall_score=overall_score(market_results))
 
     run = await VisibilityRun.finish(
         run.id,
-        overall_score=overall_score(scored),
-        detection_rate=detection_rate(scored),
-        share_of_voice=share_of_voice(scored),
-        positive_rate=positive_rate(scored),
-        top3_rate=top3_rate(scored),
-        citation_rate=citation_rate(scored),
+        overall_score=overall_score(scored_results),
+        detection_rate=detection_rate(scored_results),
+        share_of_voice=share_of_voice(scored_results),
+        positive_rate=positive_rate(scored_results),
+        top3_rate=top3_rate(scored_results),
+        citation_rate=citation_rate(scored_results),
     )
     await PromptResult.assign_visibility_run([result.id for result in prompt_results], run.id)
-    logger.info(f"[visibility] run {run.id} done for brand {brand.id}: overall={run.overall_score:.3f} over {len(scored)} results in {len(by_market)} markets")
+    logger.info(f"[visibility] run {run.id} done for brand {brand.id}: overall={run.overall_score:.3f} over {len(scored_results)} results in {len(results_by_market)} markets")
     return run

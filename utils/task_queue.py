@@ -1,4 +1,5 @@
-"""create_task() — the ONLY way app code creates work.
+"""The queue contract, both halves: create_task() is the ONLY way app code
+creates work; task_lifecycle() is the ONLY way a worker task runs it.
 
 Writes the tasks row (our system of record) AND enqueues the procrastinate job
 in the SAME session — one commit, so state and work can never disagree (the
@@ -15,11 +16,14 @@ wraps this in its own `async with Database().connection():` + explicit commit.
 """
 
 import json
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from sqlalchemy import text
 
-from objects.task import Task
-from utils.database import Database
+from objects.task import STATUS_DONE, STATUS_FAILED, STATUS_RUNNING, Task
+from utils.database import Database, ReplicaDatabase
+from utils.logger import logger
 
 # procrastinate 3.x ships this function in its schema exactly for callers on
 # their own connection (composite type: queue, task_name, priority, lock,
@@ -57,3 +61,35 @@ async def create_task(
         },
     )
     return task
+
+
+@asynccontextmanager
+async def task_lifecycle(task_id: str) -> AsyncIterator[Task]:
+    """Everything around one task run, so runner files hold only the work:
+    opens the DB connections, marks the task running -> done, logs start/end —
+    and on failure rolls back, marks the task failed, and re-raises so
+    procrastinate retries. Yields the Task row (payload access for runners
+    that dispatch on it).
+
+        @app.task(name="site_audit", queue="audit", retry=2)
+        async def site_audit(task_id: str, brand_id: str) -> None:
+            async with task_lifecycle(task_id):
+                await run_site_audit(brand_id)
+    """
+    async with ReplicaDatabase().connection():
+        async with Database().connection():
+            task = await Task.get(task_id)
+            logger.info(f"[{task.name}] started (task {task.id}, brand {task.brand_id})", priority="medium")
+            await Task.update_status(task.id, STATUS_RUNNING)
+            await Database.session.commit()
+            try:
+                yield task
+                await Task.update_status(task.id, STATUS_DONE)
+                await Database.session.commit()
+                logger.info(f"[{task.name}] done (task {task.id})", priority="medium")
+            except Exception as exc:
+                await Database.session.rollback()
+                await Task.update_status(task.id, STATUS_FAILED)
+                await Database.session.commit()
+                logger.error(f"[{task.name}] failed (task {task.id}, brand {task.brand_id}): {exc}")
+                raise

@@ -1,30 +1,29 @@
 import hashlib
 import json
 
-from utils.database import Database
-from utils.llm_usage import estimate_cost, summarize_usage
-from objects.batch import Batch
+import settings
 from adapters.registry import initialize_adapter
 from adapters.services.claude_service import ClaudeService
 from constants.constants import UsageKind
-import settings
-from schemas.provider_schemas import QueryRequest, QueryResult, LocationContext
+from objects.batch import Batch
 from objects.brand import Brand
 from objects.citation import Citation
 from objects.competitor import Competitor
 from objects.competitor_mention import CompetitorMention
 from objects.cost_event import CostEvent
-from objects.prompt import Prompt
 from objects.market import Market
+from objects.prompt import Prompt
 from objects.prompt_result import SENTIMENT_NEUTRAL, SENTIMENT_POSITIVE, PromptResult
 from objects.query_response import QueryResponse
 from schemas.prompt_result_schemas import PromptResultWithCompetitorMentions
-from utils.query_normalization import query_hash
-from utils.visibility import hydrate_prompt_result
-from utils.logger import logger
+from schemas.provider_schemas import LocationContext, QueryRequest, QueryResult
 from utils.competitor_matching import build_competitor_regex_patterns, parse_prompt_result_for_competitor_mention_rank
+from utils.database import Database
+from utils.llm_usage import estimate_cost, summarize_usage
+from utils.logger import logger
+from utils.query_normalization import query_hash
 from utils.response_parsing import parse_prompt_result_for_mention_rank
-
+from utils.tasks.visibility import hydrate_prompt_result
 
 RESPONSE_TRUNCATE_CHARS = 1500
 # Sentiment analysis is packed: many responses per LLM call, instead of one

@@ -26,5 +26,18 @@ app = procrastinate.App(
     connector=procrastinate.PsycopgConnector(
         conninfo=f"postgresql://{settings.DATABASE_USERNAME}:{settings.DATABASE_PASSWORD}@{settings.DATABASE_HOST}:{settings.DATABASE_PORT}/{settings.DATABASE_NAME}",
     ),
-    import_paths=["worker.tasks.schedules", "worker.tasks.collection", "worker.tasks.site_audit", "worker.tasks.visibility"],
+    import_paths=[
+        "worker.tasks.schedules",
+        "worker.tasks.collection",
+        "worker.tasks.site_audit",
+        "worker.tasks.visibility",
+        "worker.tasks.metrics",
+        "worker.tasks.briefs",
+        "worker.tasks.outreach",
+        "worker.tasks.reputation",
+        "worker.tasks.content",
+        "worker.tasks.reports",
+        "worker.tasks.planning",
+        "worker.tasks.fixes",
+    ],
 )

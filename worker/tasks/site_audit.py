@@ -1,20 +1,14 @@
-"""First pipeline stub: the site audit.
-
-Fires when a site connects (onboarding step 4) and weekly thereafter.
-Created ONLY via utils.task_queue.create_task() (tasks row + job, one commit).
-TODO (in order):
-  1. glue to the `tasks` table: load the row by task_id, update status
-     (running -> done/failed/dead), enforce lifetime token budget across retries
-  2. crawl via the site adapter, diff against last snapshot
-  3. run the audit rule engine -> typed findings
-  4. findings map to fix-generator tasks; odd cases -> `technical-judgment`
-"""
-
+from utils.task_queue import task_lifecycle
+from utils.tasks.site_audit import run_site_audit
 from worker.app import app
 
 
-@app.task(name="site_audit", queue="audit")
-async def site_audit(task_id: str, brand_id: str) -> dict:
-    # Stub — proves the queue round-trips. Replace with the real pipeline.
-    print(f"[site_audit] task={task_id} brand={brand_id} — stub ran")
-    return {"task_id": task_id, "brand_id": brand_id, "status": "stub"}
+@app.task(name="site_audit", queue="audit", retry=2)
+async def site_audit(task_id: str, brand_id: str) -> None:
+    """#3 (ongoing) — crawl + audit rule engine over the brand's connected
+    site -> typed findings. Fires at onboarding (site connect) and weekly via
+    schedule_site_audits. Chains #9: each NEW actionable finding emits a
+    technical_fix task (inside run_site_audit). Idempotent: re-detected
+    findings dedupe, vanished ones auto-resolve — retries are safe."""
+    async with task_lifecycle(task_id):
+        await run_site_audit(brand_id)
