@@ -103,7 +103,7 @@ async def _assemble_brief_facts(brand: Brand) -> dict:
     if latest_runs:
         current_run = latest_runs[0]
         visibility = {
-            "week_of": current_run.week_of,
+            "week_of": current_run.week_of.isoformat(),
             "overall_score": current_run.overall_score,
             "detection_rate": current_run.detection_rate,
             "share_of_voice": current_run.share_of_voice,
