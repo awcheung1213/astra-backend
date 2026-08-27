@@ -1,6 +1,6 @@
 """Audit rule engine — pure functions over fetched text."""
 
-from utils.tasks.site_audit import KIND_MISSING_H1, KIND_MISSING_META_DESCRIPTION, KIND_MISSING_SCHEMA, KIND_MISSING_TITLE, KIND_SLOW_PAGE, extract_internal_links, finding_key, page_findings, robots_blocked_agents
+from worker.tasks.site_audit import KIND_MISSING_H1, KIND_MISSING_META_DESCRIPTION, KIND_MISSING_SCHEMA, KIND_MISSING_TITLE, KIND_SLOW_PAGE, extract_internal_links, finding_key, page_findings, robots_blocked_agents
 
 GOOD_HTML = """
 <html><head><title>Best Nail Salon</title>

@@ -49,8 +49,13 @@ async def schedule_submit_prompt_execution_batch() -> None:
 @app.periodic(cron="")  # hourly
 @app.task(name="schedule_poll_batches", queue="schedules")
 async def schedule_poll_batches() -> None:
-    """#18 — ingest finished provider batches (execution -> corpus, sentiment -> analysis)."""
-    await poll_batches.defer_async()
+    """#18 — ingest finished provider batches (execution -> corpus, sentiment -> analysis).
+
+    The execution lock serializes polls: an hourly tick can fire while the
+    previous poll is still ingesting, and two concurrent polls would both see
+    the same unprocessed batch and double-ingest it. Locked, the second job
+    waits its turn and then finds nothing unprocessed."""
+    await poll_batches.configure(lock="poll_batches").defer_async()
     logger.info(f"[schedules] schedule_poll_batches tick ts={datetime.now()}")
 
 

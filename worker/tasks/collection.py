@@ -18,15 +18,13 @@ from objects.query_response import QueryResponse
 from schemas.prompt_result_schemas import PromptResultWithCompetitorMentions
 from schemas.provider_schemas import LocationContext, QueryRequest, QueryResult
 from utils.competitor_matching import build_competitor_regex_patterns, parse_prompt_result_for_competitor_mention_rank
-from utils.database import Database
+from utils.database import Database, ReplicaDatabase
 from utils.llm_usage import estimate_cost, summarize_usage
 from utils.logger import logger
 from utils.query_normalization import query_hash
 from utils.response_parsing import parse_prompt_result_for_mention_rank
-from worker.tasks.visibility import hydrate_prompt_result
-from utils.database import Database, ReplicaDatabase
-from utils.logger import logger
 from worker.app import app
+from worker.tasks.visibility import hydrate_prompt_result
 
 
 @app.task(name="submit_prompt_execution_batch", queue="collection")
@@ -35,7 +33,7 @@ async def submit_prompt_execution_batch() -> None:
 
     async with ReplicaDatabase().connection():
         async with Database().connection():
-            await submit_prompt_execution_batch()
+            await run_submit_prompt_execution_batch()
 
     logger.info(f"[collection] submit_prompt_execution_batch - end", priority="medium")
 
@@ -46,7 +44,7 @@ async def poll_batches() -> None:
 
     async with ReplicaDatabase().connection():
         async with Database().connection():
-            await poll_batches()
+            await run_poll_batches()
 
     logger.info(f"[collection] poll_batches - end", priority="medium")
 
@@ -138,8 +136,7 @@ COMPETITOR_DISCOVERY_SCHEMA = {
 # BATCH SUBMISSION
 ##############################
 
-@staticmethod
-async def submit_prompt_execution_batch() -> None:
+async def run_submit_prompt_execution_batch() -> None:
     in_process = await _in_process_cells()
     brands = await Brand.all()
     queue_for_llm: dict[str, dict[tuple[str, str], dict]] = {engine_name: {} for engine_name in settings.ACTIVE_ENGINES}
@@ -238,8 +235,7 @@ async def _in_process_cells() -> dict[str, set[tuple[str, str]]]:
 # BATCH POLL
 ##############################
 
-@staticmethod
-async def poll_batches() -> None:
+async def run_poll_batches() -> None:
     """
     1. Poll all unprocessed batches (execution or sentiment)
     2. For each batch, check its status with the provider
