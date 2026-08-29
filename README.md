@@ -58,7 +58,7 @@ built yet — chained/event runners register in the same change as their produce
 |---|---|---|
 | 18 | Rank + AI-answer movement monitoring | `worker/tasks/collection.py` (submit/poll batches → shared corpus) + `worker/tasks/metrics.py` `metrics_ingestion` |
 | 19 | Alerting (index drops, site down, CWV regressions) | `worker/tasks/metrics.py` `alert_detection` — also the producer of #12 and #23 |
-| 20 | Journalist-request responses (same-day deadlines) | `worker/tasks/outreach.py` `outreach_scout` (`journalist_requests` scan, daily) |
+| 20 | Journalist-request responses (same-day deadlines) | `worker/tasks/outreach.py` `outreach_scout` (`journalist_requests` scan, daily) — TODO(#20): Connectively/Qwoted adapters |
 | 21 | Community thread opportunities | `worker/tasks/outreach.py` `outreach_scout` (`community_threads` scan) |
 | 22 | Unlinked mention reclamation | `worker/tasks/outreach.py` `outreach_scout` (`unlinked_mentions` scan) |
 | 23 | Algorithm-update triage | `worker/tasks/planning.py` `diagnosis` *(planned)* — chained from `alert_detection`, "as needed" has no cron |

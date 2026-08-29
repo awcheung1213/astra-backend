@@ -1,13 +1,13 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, func, text
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, func, select, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from exceptions.exceptions import TaskNotFound
 from objects.base_object import BaseObject
-from utils.database import Database
+from utils.database import Database, ReplicaDatabase
 
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
@@ -47,6 +47,18 @@ class Task(SQLModel, BaseObject, table=True):
         if task is None:
             raise TaskNotFound()
         return task
+
+    @staticmethod
+    async def first_queued(brand_id: str, name: str) -> "Task | None":
+        rows = await ReplicaDatabase.session.execute(select(Task).where(Task.brand_id == brand_id).where(Task.name == name).where(Task.status == STATUS_QUEUED).limit(1))
+        return rows.scalars().first()
+
+    @staticmethod
+    async def in_flight(brand_id: str, name: str) -> list["Task"]:
+        """Queued or running tasks of one name — producers check this before
+        chaining so the same work is never stacked twice."""
+        rows = await ReplicaDatabase.session.execute(select(Task).where(Task.brand_id == brand_id).where(Task.name == name).where(Task.status.in_((STATUS_QUEUED, STATUS_RUNNING))))  # type: ignore
+        return list(rows.scalars().all())
 
     @staticmethod
     async def update_status(id: str, status: str) -> None:

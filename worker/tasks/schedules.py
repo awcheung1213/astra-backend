@@ -176,7 +176,9 @@ async def schedule_client_chases() -> None:
 @app.periodic(cron="")  # daily 13:00 UTC — same-day deadlines
 @app.task(name="schedule_journalist_scans", queue="schedules")
 async def schedule_journalist_scans() -> None:
-    """#20 — Connectively/Qwoted request scan; scout flags + drafts, human sends."""
+    """#20 — journalist/source request scan; scout flags + drafts, human sends.
+    Shallow until the Connectively/Qwoted adapters land — see outreach.py's
+    TODO(#20)."""
     count = await _create_task_per_active_brand(name="outreach_scout", queue="outreach", payload={"scan": "journalist_requests"})
     logger.info(f"[schedules] schedule_journalist_scans tick ts={datetime.now()}: {count} scans")
 

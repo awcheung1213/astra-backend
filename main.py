@@ -39,6 +39,9 @@ app.add_middleware(
 )
 
 # routers register here as resources land (api/organizations.py, api/brands.py, ...)
+from api.onboarding import router as onboarding_router  # noqa: E402
+
+app.include_router(onboarding_router)
 
 app.add_middleware(InternalServerErrorMiddleware)
 app.add_middleware(DatabaseSessionMiddleware)

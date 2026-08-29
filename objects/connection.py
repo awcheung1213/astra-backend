@@ -1,12 +1,13 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
-from objects.site import STATUS_PENDING
+from objects.site import STATUS_CONNECTED, STATUS_PENDING
+from utils.database import ReplicaDatabase
 
 
 class Connection(SQLModel, BaseObject, table=True):
@@ -22,3 +23,8 @@ class Connection(SQLModel, BaseObject, table=True):
     meta: dict = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False, server_default="{}"))
     connected_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def connected_for_brand(brand_id: str) -> list["Connection"]:
+        rows = await ReplicaDatabase.session.execute(select(Connection).where(Connection.brand_id == brand_id).where(Connection.status == STATUS_CONNECTED))
+        return list(rows.scalars().all())

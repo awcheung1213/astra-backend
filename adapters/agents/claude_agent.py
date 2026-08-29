@@ -129,6 +129,8 @@ class ClaudeAgent:
             response = await self.agent_turn(messages, system=system, tools=tools)
             if operation is not None:
                 usage = response.usage
+                server_tool_use = getattr(usage, "server_tool_use", None)
+                web_search_count = (getattr(server_tool_use, "web_search_requests", 0) or 0) if server_tool_use else 0
                 await CostEvent.create(
                     adapter="claude",
                     operation=operation,
@@ -138,7 +140,8 @@ class ClaudeAgent:
                     model=response.model,
                     input_tokens=usage.input_tokens,
                     output_tokens=usage.output_tokens,
-                    usd=estimate_cost("claude", response.model, usage.input_tokens, usage.output_tokens),
+                    web_search_count=web_search_count,
+                    usd=estimate_cost("claude", response.model, usage.input_tokens, usage.output_tokens, web_search_count),
                 )
             if on_usage is not None:
                 await on_usage(response.usage)

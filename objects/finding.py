@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select
 from sqlalchemy.dialects.postgresql import JSONB
@@ -55,6 +55,11 @@ class Finding(SQLModel, BaseObject, table=True):
     @staticmethod
     async def open_for_brand(brand_id: str) -> list["Finding"]:
         rows = await ReplicaDatabase.session.execute(select(Finding).where(Finding.brand_id == brand_id).where(Finding.status == STATUS_OPEN))
+        return list(rows.scalars().all())
+
+    @staticmethod
+    async def resolved_since(brand_id: str, since: date) -> list["Finding"]:
+        rows = await ReplicaDatabase.session.execute(select(Finding).where(Finding.brand_id == brand_id).where(Finding.status == STATUS_FIXED).where(Finding.resolved_at >= since))  # type: ignore
         return list(rows.scalars().all())
 
     @staticmethod

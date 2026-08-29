@@ -7,7 +7,7 @@ from sqlmodel import Field, SQLModel
 
 from exceptions.exceptions import BrandNotFound
 from objects.base_object import BaseObject
-from utils.database import ReplicaDatabase
+from utils.database import Database, ReplicaDatabase
 
 PLATFORM_WORDPRESS = "wordpress"
 PLATFORM_SHOPIFY = "shopify"
@@ -49,3 +49,15 @@ class Brand(SQLModel, BaseObject, table=True):
     async def all() -> list["Brand"]:
         brands = await ReplicaDatabase.session.exec(select(Brand))
         return list(brands)
+
+    @staticmethod
+    async def update(id: str, **fields) -> "Brand":
+        brand = await Database.session.get(Brand, id)
+        if not brand:
+            raise BrandNotFound()
+        for field_name, value in fields.items():
+            setattr(brand, field_name, value)
+        Database.session.add(brand)
+        await Database.session.flush()
+        await Database.session.refresh(brand)
+        return brand
