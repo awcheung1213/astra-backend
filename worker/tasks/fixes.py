@@ -74,7 +74,7 @@ async def technical_judgment(task_id: str, brand_id: str) -> None:
             return
         brand = await Brand.get(brand_id)
         page_url = (finding.detail or {}).get("url", brand.website_url)
-        page_text = _visible_text(await _fetch_page_html(page_url) or "")
+        page_text = visible_text(await fetch_page_html(page_url) or "")
 
         proposal_markdown = await ClaudeAgent().run_role(
             ROLE_TECHNICAL,
@@ -111,7 +111,7 @@ async def _generate_fix(finding: Finding, brand: Brand, page_url: str) -> dict |
     if finding.kind == KIND_MISSING_SCHEMA:
         return {"field": "schema_markup", "value": _schema_markup(brand), "derived_from": "brand profile"}
 
-    page_html = await _fetch_page_html(page_url)
+    page_html = await fetch_page_html(page_url)
     if page_html is None:
         return None
 
@@ -151,7 +151,7 @@ def _schema_markup(brand: Brand) -> dict:
 ##############################
 
 
-async def _fetch_page_html(url: str) -> str | None:
+async def fetch_page_html(url: str) -> str | None:
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=FETCH_TIMEOUT_SECONDS, headers={"User-Agent": "AstraAudit/1.0"}) as client:
             response = await client.get(url)
@@ -171,7 +171,7 @@ def _first_match_text(pattern: str, html: str) -> str | None:
     return text or None
 
 
-def _visible_text(html: str) -> str:
+def visible_text(html: str) -> str:
     body = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.I | re.S)
     body = re.sub(r"<[^>]+>", " ", body)
     return re.sub(r"\s+", " ", body).strip()
@@ -180,7 +180,7 @@ def _visible_text(html: str) -> str:
 def _leading_page_text(html: str, max_chars: int) -> str | None:
     """The page's opening copy, cut at a word boundary — meta-description raw
     material. None when the page has too little text to describe itself."""
-    text = _visible_text(html)
+    text = visible_text(html)
     if len(text) < MIN_SOURCE_TEXT_CHARS:
         return None
     if len(text) <= max_chars:

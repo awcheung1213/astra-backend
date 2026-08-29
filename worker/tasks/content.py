@@ -1,8 +1,9 @@
-"""The Content agent's monthly cadence: the calendar.
+"""The Content agent's runners: the monthly calendar (#10) and the chained
+page refresh (#12).
 
 Facts come from the database (the approved plan, last month's calendar,
-visibility gaps); the agent turns them into a structured month of pieces.
-The calendar lands behind the approval gate — approved rows fan out
+visibility gaps, decay evidence); the agent writes over them. Everything
+lands behind the approval gate — approved calendar rows fan out
 content_draft tasks (#11) from the approval signal, never from here."""
 
 import json
@@ -14,9 +15,12 @@ from objects.notification import KIND_UPDATE, Notification
 from objects.prompt import Prompt
 from objects.prompt_result import PromptResult
 from objects.visibility_run import VisibilityRun
+from utils.agent_json import parse_agent_json
 from utils.agent_prompts import ROLE_CONTENT
+from utils.logger import logger
 from utils.task_queue import task_lifecycle
 from worker.app import app
+from worker.tasks.fixes import fetch_page_html, visible_text
 
 
 @app.task(name="content_calendar", queue="content", retry=2)
@@ -44,8 +48,46 @@ async def content_calendar(task_id: str, brand_id: str) -> None:
         await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title="Next month's content calendar is ready for review", link_ref=f"artifacts/{calendar.id}")
 
 
+@app.task(name="content_refresh", queue="content", retry=2)
+async def content_refresh(task_id: str, brand_id: str) -> None:
+    """#12 — CHAINED from alert_detection, one per decayed page (payload
+    carries the page + decay evidence). The Content agent reads the live page
+    and proposes the refreshed version -> draft artifact behind the gate;
+    approval converts it to a change set. A page that no longer loads is a
+    technical problem, not a content one — no-op and let the audit see it."""
+    async with task_lifecycle(task_id) as task:
+        page_url = (task.payload or {}).get("page", "")
+        decay_evidence = (task.payload or {}).get("evidence", {})
+        if not page_url:
+            raise ValueError("content_refresh payload has no page")
+        brand = await Brand.get(brand_id)
+
+        page_text = visible_text(await fetch_page_html(page_url) or "")
+        if not page_text:
+            logger.info(f"[content] brand {brand.id}: decayed page unreachable ({page_url}) — leaving it to the audit")
+            return
+
+        agent_output = await ClaudeAgent().run_role(
+            ROLE_CONTENT,
+            prompt=_refresh_prompt(brand, page_url, page_text, decay_evidence),
+            tools=[],
+            handlers={},
+            operation="content_refresh",
+            organization_id=brand.organization_id,
+            brand_id=brand.id,
+            task_id=task_id,
+        )
+        draft = parse_agent_json(agent_output)
+        if not isinstance(draft, dict) or not all(draft.get(field) for field in ("title", "meta_description", "body_markdown", "change_summary")):
+            raise ValueError(f"refresh output is missing draft fields: {agent_output[:200]}")
+
+        await Artifact.create(task_id=task_id, brand_id=brand.id, type="draft", content={"kind": "refresh", "page": page_url, **draft}, evidence={"decay": decay_evidence})
+        logger.info(f"[content] brand {brand.id}: refresh drafted for {page_url}")
+
+
 CALENDAR_MAX_ENTRIES = 8  # pieces per month — quality over volume
 GAP_QUERY_LIMIT = 15  # how many visibility-gap queries ride the prompt
+REFRESH_PAGE_TEXT_CHARS = 6000  # how much of the live page rides the refresh prompt
 
 
 ##############################
@@ -122,16 +164,29 @@ def _calendar_prompt(brand: Brand, facts: dict) -> str:
 
 
 def _parse_calendar_entries(agent_output: str) -> list[dict]:
-    """The agent must return a JSON array (a stray code fence is tolerated).
-    Anything else is a failed attempt — raise so procrastinate retries."""
-    body = agent_output.strip()
-    if body.startswith("```"):
-        body = body.strip("`\n")
-        body = body.removeprefix("json")
-    entries = json.loads(body)
+    """A JSON array of titled entries, or ValueError so procrastinate retries."""
+    entries = parse_agent_json(agent_output)
     if not isinstance(entries, list) or not entries or not all(isinstance(entry, dict) and entry.get("title") for entry in entries):
         raise ValueError(f"calendar output is not a list of titled entries: {agent_output[:200]}")
     return entries
+
+
+def _refresh_prompt(brand: Brand, page_url: str, page_text: str, decay_evidence: dict) -> str:
+    return (
+        "The page below has been losing search traffic. Refresh it: keep what works, update stale or thin\n"
+        "sections, strengthen it against the queries it should serve, and improve structure. Work ONLY from\n"
+        "the current page content and the brand context — never invent facts, stats, or offers.\n\n"
+        "Respond with ONLY a JSON object, no prose and no code fences:\n"
+        '{"title": "...", "meta_description": "...", "target_queries": ["..."], "body_markdown": "the full refreshed page",\n'
+        ' "change_summary": "what you changed and why, for the reviewer"}\n\n'
+        f"Brand: {brand.name} ({brand.website_url})\n"
+        f"Description: {brand.description}\n"
+        f"Audience: {brand.audience}\n"
+        f"Differentiators: {brand.differentiators}\n\n"
+        f"Page: {page_url}\n"
+        f"Decay evidence: {json.dumps(decay_evidence)}\n\n"
+        f"Current page text:\n{page_text[:REFRESH_PAGE_TEXT_CHARS]}"
+    )
 
 
 # TODO(#11) content_draft — runner lands HERE, registered in the same change as
@@ -140,6 +195,3 @@ def _parse_calendar_entries(agent_output: str) -> list[dict]:
 #       meta description, target queries — SME material when it exists) ->
 #       draft artifact behind the gate; approval converts it to a change set.
 #       #25's data-study write-up rides this runner too (study data in payload).
-# TODO(#12) content_refresh — runner lands HERE, registered with its producer
-#       (alert_detection): payload carries the decayed page + decay evidence;
-#       Content agent proposes the refresh -> draft artifact behind the gate.
