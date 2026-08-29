@@ -79,17 +79,20 @@ async def task_lifecycle(task_id: str) -> AsyncIterator[Task]:
     async with ReplicaDatabase().connection():
         async with Database().connection():
             task = await Task.get(task_id)
-            logger.info(f"[{task.name}] started (task {task.id}, brand {task.brand_id})", priority="medium")
-            await Task.update_status(task.id, STATUS_RUNNING)
+            # plain copies: rollback() expires ORM instances, and re-reading an
+            # expired attribute on an async session raises MissingGreenlet
+            task_name, task_brand_id = task.name, task.brand_id
+            logger.info(f"[{task_name}] started (task {task_id}, brand {task_brand_id})", priority="medium")
+            await Task.update_status(task_id, STATUS_RUNNING)
             await Database.session.commit()
             try:
                 yield task
-                await Task.update_status(task.id, STATUS_DONE)
+                await Task.update_status(task_id, STATUS_DONE)
                 await Database.session.commit()
-                logger.info(f"[{task.name}] done (task {task.id})", priority="medium")
+                logger.info(f"[{task_name}] done (task {task_id})", priority="medium")
             except Exception as exc:
                 await Database.session.rollback()
-                await Task.update_status(task.id, STATUS_FAILED)
+                await Task.update_status(task_id, STATUS_FAILED)
                 await Database.session.commit()
-                logger.error(f"[{task.name}] failed (task {task.id}, brand {task.brand_id}): {exc}")
+                logger.error(f"[{task_name}] failed (task {task_id}, brand {task_brand_id}): {exc}")
                 raise
