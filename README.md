@@ -15,6 +15,67 @@ Design source of truth (live artifacts):
 - [System design doc](https://claude.ai/code/artifact/abf28a78-3838-4eb0-a88a-8323a0528a6c) — architecture, full column spec, queue contract
 - [UI mockup](https://claude.ai/code/artifact/17c0d228-c643-4012-ae95-368d0b316d90) · [Onboarding flow](https://claude.ai/code/artifact/88b641ff-6385-4d9b-ad3c-0096daaeac5c)
 
+## The 26 deliverables → where they live
+
+The design doc's "26 deliverables — why these workers exist" card is the
+product's table of contents; this maps each row to code. Every `#N` comment
+across `worker/` refers to this numbering. Cadence triggers all live in
+`worker/tasks/schedules.py` (one cron per scheduled deliverable; the ones that
+deliberately do NOT ride cron are documented in its bottom comment).
+*(planned)* = the file documents the deliverable but the task/router is not
+built yet — chained/event runners register in the same change as their producer.
+
+### One-time: onboarding (month 1)
+
+| # | Deliverable | Where it lives |
+|---|---|---|
+| 1 | Access provisioning | `api/onboarding.py` *(planned)* creates the client-task rows (no queue job); `worker/tasks/briefs.py` `client_chase` nags them daily |
+| 2 | Kickoff interview → business context | `api/onboarding.py` *(planned)*, AM-conducted → `brands` context fields |
+| 3 | Full technical audit | `worker/tasks/site_audit.py` (fires at site connect, then weekly) |
+| 4 | Keyword + AI-prompt research | `worker/tasks/research.py` *(planned)* `prompt_research`, fired by onboarding, re-fired by plan updates |
+| 5 | Competitor & citation-source gap analysis | `worker/tasks/research.py` *(planned)* bootstrap + `worker/tasks/collection.py` continuous ~5% discovery sampling |
+| 6 | Baseline report | the brand's first run of `worker/tasks/visibility.py` + `worker/tasks/reports.py`, fired by onboarding |
+| 7 | Conversion tracking setup | `api/onboarding.py` *(planned)* config + a client verification task (chased via `briefs.py`) |
+| 8 | 6-month strategy roadmap | the first `plan_update` in `worker/tasks/planning.py`, fired by onboarding |
+
+### Monthly recurring (the retainer's core)
+
+| # | Deliverable | Where it lives |
+|---|---|---|
+| 9 | Technical fixes from ongoing monitoring | `worker/tasks/fixes.py` (`technical_fix` + `technical_judgment`), chained per new finding from `site_audit.py` |
+| 10 | Content calendar | `worker/tasks/content.py` `content_calendar` (monthly cron) |
+| 11 | New content produced & published | `worker/tasks/content.py` `content_draft` *(planned)* — fans out from the APPROVED calendar, never cron |
+| 12 | Existing-page optimization / refresh | `worker/tasks/content.py` `content_refresh` *(planned)* — chained from `alert_detection` |
+| 13 | Link building / digital PR placements | `worker/tasks/outreach.py` `outreach_scout` (`citation_targets` scan) |
+| 14 | GBP management (posts, Q&A, review responses) | `worker/tasks/reputation.py` `gbp_management`; `review_response` *(planned)* — webhook-fired |
+| 15 | Review generation campaign | `worker/tasks/reputation.py` `review_asks` |
+| 16 | Monthly report + walkthrough | `worker/tasks/reports.py` `monthly_report` |
+| 17 | AI visibility / share-of-voice report | `worker/tasks/visibility.py` `visibility_run` (weekly trend point) |
+
+### Weekly / daily (where retention is won)
+
+| # | Deliverable | Where it lives |
+|---|---|---|
+| 18 | Rank + AI-answer movement monitoring | `worker/tasks/collection.py` (submit/poll batches → shared corpus) + `worker/tasks/metrics.py` `metrics_ingestion` |
+| 19 | Alerting (index drops, site down, CWV regressions) | `worker/tasks/metrics.py` `alert_detection` — also the producer of #12 and #23 |
+| 20 | Journalist-request responses (same-day deadlines) | `worker/tasks/outreach.py` `outreach_scout` (`journalist_requests` scan, daily) |
+| 21 | Community thread opportunities | `worker/tasks/outreach.py` `outreach_scout` (`community_threads` scan) |
+| 22 | Unlinked mention reclamation | `worker/tasks/outreach.py` `outreach_scout` (`unlinked_mentions` scan) |
+| 23 | Algorithm-update triage | `worker/tasks/planning.py` `diagnosis` *(planned)* — chained from `alert_detection`, "as needed" has no cron |
+
+### Quarterly
+
+| # | Deliverable | Where it lives |
+|---|---|---|
+| 24 | Strategy review + roadmap refresh | `worker/tasks/planning.py` `plan_update` (quarterly cron) |
+| 25 | Original data study | plan-driven: #24 emits it; the client collects the data (chased via `briefs.py`); the write-up rides `content.py`'s `content_draft` |
+| 26 | Competitor landscape re-baseline | covered by `collection.py`'s continuous discovery sampling — no separate runner on purpose |
+
+Cross-cutting, un-numbered: the Pulse weekly brief + client chase
+(`worker/tasks/briefs.py`), the agent program (`adapters/agents/claude_agent.py`)
+with its role prompts (`utils/agent_prompts.py`), and the queue contract
+(`utils/task_queue.py` — `create_task` + `task_lifecycle`).
+
 ## Quickstart
 
 ```bash

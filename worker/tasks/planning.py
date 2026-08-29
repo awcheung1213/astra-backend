@@ -9,5 +9,14 @@ async def plan_update(task_id: str, brand_id: str) -> None:
     Emits a plan artifact; approved plans fan out content_draft /
     outreach_scout work."""
     async with task_lifecycle(task_id):
-        # TODO: diagnoses + goals + metrics -> Strategist agent -> plan artifact
+        # TODO(#24/#8): diagnoses + goals + metrics -> Strategist agent -> plan
+        #       artifact behind the gate; approval fans out workstreams
+        #       (content_draft, outreach emphasis, #25 client data tasks, #4 re-run)
         pass
+
+
+# TODO(#23) diagnosis — runner lands HERE, registered in the same change as its
+#       producer (alert_detection; the Ask endpoint also emits it): Analyst
+#       agent over metrics + the change ledger -> diagnosis artifact with
+#       receipts (every causal claim tied to a dated data point); feeds the
+#       next plan_update.

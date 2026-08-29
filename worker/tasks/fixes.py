@@ -135,6 +135,10 @@ async def _generate_fix(finding: Finding, brand: Brand, page_url: str) -> dict |
 
 def _schema_markup(brand: Brand) -> dict:
     """LocalBusiness/Organization JSON-LD from the brand profile alone."""
+    # TODO(#9): enrich with NAP/hours via a business_facts helper once an
+    #       authoritative adapter lands — precedence GBP (#14's adapter) ->
+    #       CMS store settings -> interview-confirmed fields; omit fields with
+    #       no trusted source, never scrape them off the page.
     business_type = "LocalBusiness" if brand.footprint == FOOTPRINT_LOCAL else "Organization"
     schema = {"@context": "https://schema.org", "@type": business_type, "name": brand.name, "url": brand.website_url}
     if brand.description:

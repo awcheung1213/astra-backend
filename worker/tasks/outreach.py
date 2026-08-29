@@ -16,5 +16,7 @@ async def outreach_scout(task_id: str, brand_id: str) -> None:
     sending stays outside the system by design."""
     async with task_lifecycle(task_id) as task:
         scan = (task.payload or {}).get("scan", "")
-        # TODO: dispatch on `scan` -> scout agent -> Artifact(type="pitch")
+        # TODO(#13/#20/#21/#22): dispatch on `scan` -> scout agent (ROLE_OUTREACH_SCOUT,
+        #       web search ON) -> one Artifact(type="pitch") per opportunity + a Pulse
+        #       notification for #20 (same-day deadlines ride urgency=urgent)
         logger.info(f"[outreach_scout] scan={scan} for brand {brand_id} — stub")

@@ -9,5 +9,7 @@ async def monthly_report(task_id: str, brand_id: str) -> None:
     AM prose is written OVER the facts, never by them. Emits the reports row
     (immutable once published)."""
     async with task_lifecycle(task_id):
-        # TODO: assemble metrics -> Report row -> AM narrative pass
+        # TODO(#16): assemble facts (visibility runs, metric points, shipped change
+        #       sets, findings closed, completed tasks) -> AM narrative OVER them
+        #       (briefs.py's assembler pattern) -> immutable report artifact + Pulse
         pass

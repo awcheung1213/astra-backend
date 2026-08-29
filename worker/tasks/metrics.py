@@ -9,7 +9,7 @@ async def metrics_ingestion(task_id: str, brand_id: str) -> None:
     API exists) -> one normalized metric_points store (upsert on re-sync).
     External reads via the Google adapter."""
     async with task_lifecycle(task_id):
-        # TODO: GSC/GA4/calls/orders -> MetricPoint upserts
+        # TODO(#18): GSC/GA4/calls/orders via the Google adapter -> MetricPoint upserts
         pass
 
 
@@ -20,6 +20,7 @@ async def alert_detection(task_id: str, brand_id: str) -> None:
     tasks: content_refresh per decayed page (#12) and diagnosis on
     update-shaped change-points (#23)."""
     async with task_lifecycle(task_id):
-        # TODO: thresholds/change-points -> notifications
-        #       + create_task(name="content_refresh" | "diagnosis", ...)
+        # TODO(#19): thresholds/change-points -> Pulse notifications
+        # TODO(#12): chain create_task(name="content_refresh", payload={page + decay evidence}) per decayed page
+        # TODO(#23): chain create_task(name="diagnosis") on update-shaped change-points
         pass

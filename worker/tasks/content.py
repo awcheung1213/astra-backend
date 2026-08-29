@@ -132,3 +132,14 @@ def _parse_calendar_entries(agent_output: str) -> list[dict]:
     if not isinstance(entries, list) or not entries or not all(isinstance(entry, dict) and entry.get("title") for entry in entries):
         raise ValueError(f"calendar output is not a list of titled entries: {agent_output[:200]}")
     return entries
+
+
+# TODO(#11) content_draft — runner lands HERE, registered in the same change as
+#       its producer (the calendar-approval endpoint): payload carries one
+#       approved calendar entry; Content agent writes the full draft (title,
+#       meta description, target queries — SME material when it exists) ->
+#       draft artifact behind the gate; approval converts it to a change set.
+#       #25's data-study write-up rides this runner too (study data in payload).
+# TODO(#12) content_refresh — runner lands HERE, registered with its producer
+#       (alert_detection): payload carries the decayed page + decay evidence;
+#       Content agent proposes the refresh -> draft artifact behind the gate.
