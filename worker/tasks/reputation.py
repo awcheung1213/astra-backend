@@ -6,6 +6,8 @@ work to the GBP/notifier adapters when those land."""
 from adapters.agents.claude_agent import ClaudeAgent
 from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, STATUS_PENDING_REVIEW, Artifact
 from objects.brand import Brand
+from objects.notification import KIND_ALERT, Notification
+from objects.review import Review
 from utils.agent_json import parse_agent_json
 from utils.agent_prompts import ROLE_REPUTATION
 from utils.logger import logger
@@ -83,8 +85,51 @@ async def review_asks(task_id: str, brand_id: str) -> None:
         logger.info(f"[reputation] brand {brand.id}: review-ask templates drafted for review")
 
 
+@app.task(name="review_response", queue="reputation", retry=2)
+async def review_response(task_id: str, brand_id: str) -> None:
+    """#14 (the reply half) — CHAINED from the review webhook (payload carries
+    review_id); fast reply is the point. Every review gets a drafted reply in
+    brand voice -> reply artifact behind the gate (outward -> always-approve
+    floor; posting rides the GBP adapter after approval). A policy-violating
+    review ALSO gets a flag_request artifact — but the reply is drafted
+    regardless: removal is slow and often declined, and the reply is what
+    prospects read meanwhile. Negative reviews ring Pulse."""
+    async with task_lifecycle(task_id) as task:
+        review_id = (task.payload or {}).get("review_id", "")
+        review = await Review.get(review_id)
+        if review.reply_artifact_id is not None:
+            logger.info(f"[reputation] review {review.id}: reply already drafted — nothing to do")
+            return
+        brand = await Brand.get(brand_id)
+
+        agent_output = await ClaudeAgent().run_role(
+            ROLE_REPUTATION,
+            prompt=_reply_prompt(brand, review),
+            tools=[],
+            handlers={},
+            operation="review_response",
+            organization_id=brand.organization_id,
+            brand_id=brand.id,
+            task_id=task_id,
+        )
+        response = parse_agent_json(agent_output)
+        if not isinstance(response, dict) or not (isinstance(response.get("reply"), str) and response["reply"].strip()):
+            raise ValueError(f"review response output has no reply: {agent_output[:200]}")
+
+        reply_artifact = await Artifact.create(task_id=task_id, brand_id=brand.id, type="reply", content={"review_id": review.id, "platform": review.platform, "reply": response["reply"]}, evidence={"rating": review.rating, "author": review.author, "review_text": review.text})
+        await Review.link_reply(review.id, reply_artifact.id)
+
+        policy_violation = response.get("policy_violation")
+        if isinstance(policy_violation, dict) and policy_violation.get("clause"):
+            await Artifact.create(task_id=task_id, brand_id=brand.id, type="flag_request", content={"review_id": review.id, "platform": review.platform, "external_id": review.external_id, **policy_violation})
+
+        if review.rating <= NEGATIVE_RATING_MAX:
+            await Notification.create(organization_id=brand.organization_id, kind=KIND_ALERT, title="A negative review needs your attention", body=f"{review.rating}-star on {review.platform} — a reply is drafted for your approval.", link_ref=f"artifacts/{reply_artifact.id}")
+
+
 GBP_POST_COUNT = 2
 GBP_QA_COUNT = 2
+NEGATIVE_RATING_MAX = 2  # at or below this, the owner hears about it directly
 
 
 ##############################
@@ -110,6 +155,22 @@ def _touches_prompt(brand: Brand, previous_posts: list[str]) -> str:
     )
 
 
+def _reply_prompt(brand: Brand, review: Review) -> str:
+    return (
+        "Draft the brand's public reply to the customer review below. Thank genuinely, address the\n"
+        "specifics they raised (never a template that ignores what they said), keep it short, and never\n"
+        "argue, admit legal liability, or offer compensation. For a negative review: acknowledge, take it\n"
+        "offline gracefully, stay composed.\n\n"
+        "Separately judge whether the review violates the platform's content policy (fake, conflict of\n"
+        "interest, hate, off-topic) — flag it ONLY when a specific clause genuinely applies.\n\n"
+        "Respond with ONLY a JSON object, no prose and no code fences:\n"
+        '{"reply": "...", "policy_violation": null or {"clause": "the specific policy clause", "reason": "..."}}\n\n'
+        f"Brand: {brand.name}\n"
+        f"Description: {brand.description}\n\n"
+        f"Review ({review.platform}, {review.rating} stars, by {review.author or 'anonymous'}):\n{review.text or '(no text — rating only)'}"
+    )
+
+
 def _ask_templates_prompt(brand: Brand) -> str:
     return (
         "Draft the brand's review-ask templates: one email (subject + body) and one SMS, sent to a customer\n"
@@ -124,10 +185,3 @@ def _ask_templates_prompt(brand: Brand) -> str:
         f"Description: {brand.description}\n"
         f"Audience: {brand.audience}"
     )
-
-
-# TODO(#14, the reply half) review_response — runner lands HERE, registered in
-#       the same change as its producer (the new-review webhook endpoint):
-#       every review gets a drafted reply in brand voice, plus a flag_request
-#       artifact when it violates platform policy; replies post via the GBP
-#       adapter behind the approval gate (outward -> always-approve floor).

@@ -52,9 +52,9 @@ async def launch(brand_id: str) -> LaunchResponse:
     for work_name, work_queue in KICKOFF_WORK:
         await create_task(brand_id=brand.id, name=work_name, queue=work_queue)
 
-    # TODO(#6): the baseline is the normal weekly machinery, started early — the
-    #       prompt sign-off endpoint (phase 3) defers submit_prompt_execution_batch
-    #       so the first Sunday visibility_run scores a real baseline.
+    # #6 — the baseline is the normal weekly machinery started early: the
+    #       prompt sign-off endpoint (api/prompts.py) defers the first fill
+    #       once the human activates prompts; Sunday's visibility_run scores it.
     # TODO(#7, config half): GA4 events + call-tracking config needs the Google
     #       adapter; until then only the client verification task row exists.
 

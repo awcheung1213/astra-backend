@@ -49,3 +49,8 @@ class SiteNotFound(HTTPException):
 class ChangeSetNotFound(HTTPException):
     def __init__(self) -> None:
         super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail="change set not found")
+
+
+class ReviewNotFound(HTTPException):
+    def __init__(self) -> None:
+        super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail="review not found")

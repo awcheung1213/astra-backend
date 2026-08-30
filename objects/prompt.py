@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text, func, select
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text, func, select, update
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
@@ -32,6 +32,14 @@ class Prompt(SQLModel, BaseObject, table=True):
         await session.flush()
         await session.refresh(prompt)
         return prompt
+
+    @staticmethod
+    async def activate(brand_id: str, ids: list[str]) -> int:
+        """Sign-off: flip the chosen prompts active. Scoped to the brand so an
+        id from another brand's list is silently a no-op, not a leak."""
+        result = await Database.session.execute(update(Prompt).where(Prompt.brand_id == brand_id).where(Prompt.id.in_(ids)).where(Prompt.retired_at.is_(None)).values(is_active=True))  # type: ignore
+        await Database.session.flush()
+        return result.rowcount
 
     @staticmethod
     async def by_brand(brand_id: str) -> list["Prompt"]:

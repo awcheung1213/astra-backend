@@ -41,9 +41,13 @@ app.add_middleware(
 # routers register here as resources land (api/organizations.py, api/brands.py, ...)
 from api.approvals import router as approvals_router  # noqa: E402
 from api.onboarding import router as onboarding_router  # noqa: E402
+from api.prompts import router as prompts_router  # noqa: E402
+from api.webhooks import router as webhooks_router  # noqa: E402
 
 app.include_router(approvals_router)
 app.include_router(onboarding_router)
+app.include_router(prompts_router)
+app.include_router(webhooks_router)
 
 app.add_middleware(InternalServerErrorMiddleware)
 app.add_middleware(DatabaseSessionMiddleware)
