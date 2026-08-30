@@ -15,3 +15,9 @@ class ReviewResponse(BaseResponse):
     artifact_id: str
     status: str
     queued_work: list[str]  # task names the approval fanned out
+
+
+class RevertResponse(BaseResponse):
+    change_set_id: str  # the original, now marked reverted
+    revert_change_set_id: str  # the new set that undoes it
+    queued_work: list[str]  # empty when parked awaiting the CMS adapter

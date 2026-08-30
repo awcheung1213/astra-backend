@@ -13,9 +13,12 @@ geoviz token verifier is ported."""
 from fastapi import APIRouter, HTTPException, status
 
 from objects.artifact import STATUS_APPROVED, STATUS_PENDING_REVIEW, STATUS_REJECTED, Artifact
-from schemas.approval_schemas import DECISION_APPROVE, DECISION_REJECT, ReviewRequest, ReviewResponse
+from objects.change_set import STATUS_APPLIED, ChangeSet
+from objects.site import Site
+from schemas.approval_schemas import DECISION_APPROVE, DECISION_REJECT, RevertResponse, ReviewRequest, ReviewResponse
 from utils.logger import logger
 from utils.task_queue import create_task
+from worker.tasks.changes import APPLY_ENABLED_PLATFORMS, invert_operations, operations_for_artifact
 
 router = APIRouter(prefix="/api/v1")
 
@@ -73,11 +76,50 @@ async def _fan_out_approval(artifact: Artifact, approved_rows: list[int] | None)
         return ["prompt_research"]
 
     if artifact.type in ("change_proposal", "draft", "gbp_touches", "reply"):
-        # TODO(change-set engine): convert the approved artifact into a
-        #       change_sets row + a change_set_apply task — the ONLY site
-        #       toucher (rule 1). Until it lands, approval is recorded and the
-        #       change is applied by hand.
-        logger.info(f"[approvals] artifact {artifact.id} ({artifact.type}) approved — change-set engine not built yet, apply by hand")
-        return []
+        operations = operations_for_artifact(artifact)
+        if operations is None:
+            # prose judgment proposals and GBP work (which needs the GBP
+            # adapter, not the CMS one) — approval recorded, a human applies
+            logger.info(f"[approvals] artifact {artifact.id} ({artifact.type}) approved — no mechanical form, apply by hand")
+            return []
+        site = await Site.by_brand(artifact.brand_id)
+        if site is None:
+            logger.info(f"[approvals] artifact {artifact.id} approved but the brand has no connected site — nothing to apply")
+            return []
+        change_set, queued_work = await _create_and_dispatch_change_set(artifact.id, site, artifact.brand_id, operations)
+        return queued_work
 
     return []
+
+
+async def _create_and_dispatch_change_set(artifact_id: str, site: Site, brand_id: str, operations: list[dict]) -> tuple[ChangeSet, list[str]]:
+    """The one path a change set is born through — approval fan-out and revert
+    both use it: durable row first, apply enqueued only when the platform's
+    write adapter exists (parked pending otherwise)."""
+    change_set = await ChangeSet.create(artifact_id=artifact_id, site_id=site.id, brand_id=brand_id, operations=operations)
+    if site.platform not in APPLY_ENABLED_PLATFORMS:
+        logger.info(f"[approvals] change set {change_set.id} recorded — {site.platform} write adapter not built yet, apply parked")
+        return change_set, []
+    await create_task(brand_id=brand_id, name="change_set_apply", queue="changes", payload={"change_set_id": change_set.id})
+    return change_set, ["change_set_apply"]
+
+
+@router.post("/change_sets/{change_set_id}/revert", response_model=RevertResponse)
+async def revert_change_set(change_set_id: str) -> RevertResponse:
+    """A revert IS just a new change set: the applied set's completed ops
+    flipped from their stored rollback records, processed by the same engine.
+    The original is marked reverted and linked; the revert set reuses the
+    original's artifact so provenance stays one story. 409 unless the set is
+    applied and unreverted; 422 when an op has no rollback record to flip."""
+    original = await ChangeSet.get(change_set_id)
+    if original.status != STATUS_APPLIED or original.reverted_by_change_set_id is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"change set is {original.status}{' and already reverted' if original.reverted_by_change_set_id else ''} — only applied, unreverted sets revert")
+
+    inverse_operations = invert_operations(original)
+    if inverse_operations is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="change set contains operations with no rollback record (e.g. a published page) — revert by hand")
+
+    site = await Site.get(original.site_id)
+    revert_set, queued_work = await _create_and_dispatch_change_set(original.artifact_id, site, original.brand_id, inverse_operations)
+    await ChangeSet.mark_reverted(original.id, reverted_by_change_set_id=revert_set.id)
+    return RevertResponse.create({"change_set_id": original.id, "revert_change_set_id": revert_set.id, "queued_work": queued_work})

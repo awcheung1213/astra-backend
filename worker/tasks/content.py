@@ -1,10 +1,11 @@
-"""The Content agent's runners: the monthly calendar (#10) and the chained
-page refresh (#12).
+"""The Content agent's runners: the monthly calendar (#10), the chained new
+draft (#11), and the chained page refresh (#12).
 
 Facts come from the database (the approved plan, last month's calendar,
-visibility gaps, decay evidence); the agent writes over them. Everything
-lands behind the approval gate — approved calendar rows fan out
-content_draft tasks (#11) from the approval signal, never from here."""
+visibility gaps, decay evidence, the SME interview); the agent writes over
+them. Everything lands behind the approval gate — and the chain is strictly
+approval-driven: calendar approval fans out the drafts (api/approvals.py),
+never cron."""
 
 import json
 
@@ -48,6 +49,39 @@ async def content_calendar(task_id: str, brand_id: str) -> None:
         await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title="Next month's content calendar is ready for review", link_ref=f"artifacts/{calendar.id}")
 
 
+@app.task(name="content_draft", queue="content", retry=2)
+async def content_draft(task_id: str, brand_id: str) -> None:
+    """#11 — CHAINED from calendar approval, one per approved entry (payload
+    carries the entry; #25's data-study write-up rides this runner too, with
+    the study material in payload["material"]). The Content agent writes the
+    full piece — audience first, target queries in hand, SME-interview
+    texture worked in — -> draft artifact behind the gate; approval converts
+    it to a change set."""
+    async with task_lifecycle(task_id) as task:
+        calendar_entry = (task.payload or {}).get("entry", {})
+        extra_material = (task.payload or {}).get("material", "")
+        if not calendar_entry.get("title"):
+            raise ValueError("content_draft payload has no titled entry")
+        brand = await Brand.get(brand_id)
+
+        agent_output = await ClaudeAgent().run_role(
+            ROLE_CONTENT,
+            prompt=_draft_prompt(brand, calendar_entry, extra_material),
+            tools=[],
+            handlers={},
+            operation="content_draft",
+            organization_id=brand.organization_id,
+            brand_id=brand.id,
+            task_id=task_id,
+        )
+        draft = parse_agent_json(agent_output)
+        if not isinstance(draft, dict) or not all(draft.get(field) for field in ("title", "meta_description", "body_markdown")):
+            raise ValueError(f"draft output is missing draft fields: {agent_output[:200]}")
+
+        await Artifact.create(task_id=task_id, brand_id=brand.id, type="draft", content={"kind": "new", **draft}, evidence={"calendar_entry": calendar_entry})
+        logger.info(f"[content] brand {brand.id}: draft ready for review — {draft['title']}")
+
+
 @app.task(name="content_refresh", queue="content", retry=2)
 async def content_refresh(task_id: str, brand_id: str) -> None:
     """#12 — CHAINED from alert_detection, one per decayed page (payload
@@ -88,6 +122,7 @@ async def content_refresh(task_id: str, brand_id: str) -> None:
 CALENDAR_MAX_ENTRIES = 8  # pieces per month — quality over volume
 GAP_QUERY_LIMIT = 15  # how many visibility-gap queries ride the prompt
 REFRESH_PAGE_TEXT_CHARS = 6000  # how much of the live page rides the refresh prompt
+DRAFT_INTERVIEW_CHARS = 3000  # how much SME-interview material rides the draft prompt
 
 
 ##############################
@@ -171,6 +206,26 @@ def _parse_calendar_entries(agent_output: str) -> list[dict]:
     return entries
 
 
+def _draft_prompt(brand: Brand, calendar_entry: dict, extra_material: str) -> str:
+    interview_material = json.dumps(brand.interview_raw)[:DRAFT_INTERVIEW_CHARS] if brand.interview_raw else "(no interview material yet)"
+    return (
+        "Write the piece described by the approved calendar entry below — the full page, ready to publish.\n"
+        "Audience first, search/AI engines second, target queries in hand. Work real first-hand details from\n"
+        "the SME-interview material into it where they strengthen the piece — that texture is what ranks and\n"
+        "gets cited. Never invent facts, stats, case results, or offers.\n\n"
+        "Respond with ONLY a JSON object, no prose and no code fences:\n"
+        '{"title": "...", "meta_description": "...", "target_queries": ["..."], "body_markdown": "the full piece"}\n\n'
+        f"Calendar entry: {json.dumps(calendar_entry)}\n\n"
+        f"Brand: {brand.name} ({brand.website_url})\n"
+        f"Category: {brand.category}\n"
+        f"Description: {brand.description}\n"
+        f"Audience: {brand.audience}\n"
+        f"Differentiators: {brand.differentiators}\n\n"
+        f"SME-interview material:\n{interview_material}\n\n"
+        f"Additional material (e.g. an original data study to write up):\n{extra_material or '(none)'}"
+    )
+
+
 def _refresh_prompt(brand: Brand, page_url: str, page_text: str, decay_evidence: dict) -> str:
     return (
         "The page below has been losing search traffic. Refresh it: keep what works, update stale or thin\n"
@@ -187,11 +242,3 @@ def _refresh_prompt(brand: Brand, page_url: str, page_text: str, decay_evidence:
         f"Decay evidence: {json.dumps(decay_evidence)}\n\n"
         f"Current page text:\n{page_text[:REFRESH_PAGE_TEXT_CHARS]}"
     )
-
-
-# TODO(#11) content_draft — runner lands HERE, registered in the same change as
-#       its producer (the calendar-approval endpoint): payload carries one
-#       approved calendar entry; Content agent writes the full draft (title,
-#       meta description, target queries — SME material when it exists) ->
-#       draft artifact behind the gate; approval converts it to a change set.
-#       #25's data-study write-up rides this runner too (study data in payload).

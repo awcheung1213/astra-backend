@@ -40,5 +40,6 @@ app = procrastinate.App(
         "worker.tasks.planning",
         "worker.tasks.fixes",
         "worker.tasks.research",
+        "worker.tasks.changes",
     ],
 )

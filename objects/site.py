@@ -5,6 +5,7 @@ from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
+from exceptions.exceptions import SiteNotFound
 from objects.base_object import BaseObject
 from utils.database import ReplicaDatabase
 
@@ -28,6 +29,13 @@ class Site(SQLModel, BaseObject, table=True):
     connected_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     last_verified_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def get(id: str) -> "Site":
+        site = await ReplicaDatabase.session.get(Site, id)
+        if not site:
+            raise SiteNotFound()
+        return site
 
     @staticmethod
     async def connected() -> list["Site"]:
