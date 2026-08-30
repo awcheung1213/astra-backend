@@ -5,6 +5,7 @@ from sqlalchemy import Column, DateTime, ForeignKey, String, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
+from exceptions.exceptions import ArtifactNotFound
 from objects.base_object import BaseObject
 from utils.database import Database, ReplicaDatabase
 
@@ -44,6 +45,27 @@ class Artifact(SQLModel, BaseObject, table=True):
         session.add(artifact)
         await session.flush()
         await session.refresh(artifact)
+        return artifact
+
+    @staticmethod
+    async def get(id: str) -> "Artifact":
+        artifact = await ReplicaDatabase.session.get(Artifact, id)
+        if not artifact:
+            raise ArtifactNotFound()
+        return artifact
+
+    @staticmethod
+    async def review(id: str, status: str, reviewed_by: str | None = None) -> "Artifact":
+        """Stamp the human verdict (approved | rejected) + who and when."""
+        artifact = await Database.session.get(Artifact, id)
+        if not artifact:
+            raise ArtifactNotFound()
+        artifact.status = status
+        artifact.reviewed_by = reviewed_by
+        artifact.reviewed_at = datetime.now()
+        Database.session.add(artifact)
+        await Database.session.flush()
+        await Database.session.refresh(artifact)
         return artifact
 
     @staticmethod
