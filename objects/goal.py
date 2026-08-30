@@ -2,10 +2,11 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Column, Date, DateTime, ForeignKey, Numeric, String, func
+from sqlalchemy import Column, Date, DateTime, ForeignKey, Numeric, String, func, select
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils.database import ReplicaDatabase
 
 METRIC_LEADS = "leads"
 METRIC_REVENUE = "revenue"
@@ -21,3 +22,8 @@ class Goal(SQLModel, BaseObject, table=True):
     deadline: date | None = Field(default=None, sa_column=Column(Date, nullable=True))
     retired_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def active(brand_id: str) -> list["Goal"]:
+        rows = await ReplicaDatabase.session.execute(select(Goal).where(Goal.brand_id == brand_id).where(Goal.retired_at.is_(None)))  # type: ignore
+        return list(rows.scalars().all())
