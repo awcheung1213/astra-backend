@@ -76,6 +76,113 @@ Cross-cutting, un-numbered: the Pulse weekly brief + client chase
 with its role prompts (`utils/agent_prompts.py`), and the queue contract
 (`utils/task_queue.py` — `create_task` + `task_lifecycle`).
 
+## Pipeline map — walking the 26 through the code
+
+Read it left to right: **triggers** create typed tasks → **measure** runners
+produce rows ($0, no LLM) → **propose** runners are agent calls that only ever
+emit artifacts → the **approval gate** fans approved work out → the
+**change-set engine** is the single thing that touches a client's site.
+
+```mermaid
+flowchart LR
+    subgraph TRIG["TRIGGERS"]
+        direction TB
+        CRON["worker/tasks/schedules.py<br/>17 cron ticks<br/>_create_task_per_active_brand()"]
+        OB["api/onboarding.py<br/>launch() #1 #7 · interview() #2"]
+        PS["api/prompts.py<br/>signoff_prompts() — #4's human half"]
+        WH["api/webhooks.py<br/>review_webhook()"]
+    end
+
+    subgraph MEAS["MEASURE — pure code, rows out"]
+        direction TB
+        SUB["collection.py #18<br/>submit_prompt_execution_batch"]
+        POLL["collection.py #18<br/>poll_batches<br/>ingest_execution_batch()<br/>ingest_sentiment_batch()"]
+        VIS["visibility.py #17<br/>visibility_run<br/>(first run = #6 baseline)"]
+        AUD["site_audit.py #3<br/>site_audit<br/>_crawl() → findings diff"]
+        ING["metrics.py #18<br/>metrics_ingestion<br/>_sync_gsc/_ga4/_calls()"]
+        DET["metrics.py #19<br/>alert_detection<br/>4 detectors, named thresholds"]
+    end
+
+    subgraph WORK["PROPOSE — agents, artifacts ONLY"]
+        direction TB
+        FIX["fixes.py #9<br/>technical_fix (generators, $0)<br/>→ technical_judgment (Technical)"]
+        CAL["content.py #10<br/>content_calendar (Content)"]
+        DRAFT["content.py #11 +#25<br/>content_draft (Content)"]
+        REF["content.py #12<br/>content_refresh (Content)"]
+        SCOUT["outreach.py #13 #20 #21 #22<br/>outreach_scout (Scout + web search)"]
+        REP["reputation.py #14 #15<br/>gbp_management · review_asks<br/>review_response (Reputation)"]
+        RES["research.py #4 #5<br/>prompt_research<br/>competitor_bootstrap"]
+        DIAG["planning.py #23<br/>diagnosis (Analyst)"]
+        PLAN["planning.py #24 #8<br/>plan_update (Strategist)"]
+        AM["briefs.py Pulse #1-chase<br/>weekly_brief · client_chase (AM)<br/>reports.py #16 monthly_report (AM)"]
+    end
+
+    GATE["THE APPROVAL GATE<br/>api/approvals.py<br/>review_artifact() · _fan_out_approval()<br/>revert_change_set() · rule-7 floor"]
+    ENGINE["changes.py — the ONLY site-toucher<br/>change_set_apply (resumable ops)<br/>operations_for_artifact()<br/>invert_operations()"]
+    SITE[("client site<br/>WordPress / Shopify<br/>(write-adapter seam)")]
+    PULSE[("Pulse<br/>notifications")]
+    ROWS[("rows: corpus · prompt_results<br/>visibility_runs · findings<br/>metric_points · reports · reviews")]
+
+    CRON --> SUB & POLL & VIS & AUD & ING & DET & CAL & SCOUT & REP & AM & PLAN
+    OB -- "kickoff #4 #5 #8" --> RES & PLAN
+    OB -- "client task rows, chased daily" --> AM
+    PS -- "first fill → #6" --> SUB
+    WH -- "new review" --> REP
+    SUB --> POLL --> VIS
+    ING --> DET
+    AUD -- "new fixable finding" --> FIX
+    DET -- "decayed page #12" --> REF
+    DET -- "update-shaped drop #23" --> DIAG
+    DIAG -- "feeds" --> PLAN
+    MEAS --> ROWS
+    DET --> PULSE
+    AM --> PULSE
+    WORK --> GATE
+    GATE -- "calendar rows → #11" --> DRAFT
+    GATE -- "plan → #4 re-run" --> RES
+    GATE -- "approved ops / reverts" --> ENGINE
+    ENGINE --> SITE
+```
+
+Ground-level detail, one line per worker file (task functions first, load-bearing
+helpers after the dash):
+
+```
+worker/tasks/
+├── schedules.py    17 @app.periodic ticks, one per scheduled deliverable — the
+│                   cadence roster; non-cron deliverables listed in its bottom comment
+├── collection.py   submit_prompt_execution_batch · poll_batches — corpus dedup,
+│                   ingest_execution_batch, ingest_sentiment_batch, sentiment packs
+├── visibility.py   visibility_run — framework 1.0.0 calculators, week_of_today,
+│                   hydrate_prompt_result
+├── site_audit.py   site_audit — robots_blocked_agents, page_findings, _crawl,
+│                   findings diff (dedupe + auto-resolve), chains technical_fix
+├── fixes.py        technical_fix · technical_judgment — _generate_fix (kind→fix map),
+│                   _schema_markup, fetch_page_html/visible_text (shared)
+├── metrics.py      metrics_ingestion · alert_detection — SYNC_BY_PROVIDER seam,
+│                   _check_site_reachability, _detect_traffic_drop, _detect_page_decay
+├── content.py      content_calendar · content_draft · content_refresh —
+│                   _assemble_calendar_facts, _visibility_gaps, _parse_calendar_entries
+├── briefs.py       weekly_brief · client_chase — _assemble_brief_facts,
+│                   completed_task_counts/overdue_client_tasks (shared), CHASE_* knobs
+├── outreach.py     outreach_scout — SCAN_BRIEFS (4 hunting grounds), WEB_SEARCH_TOOL
+├── reputation.py   gbp_management · review_asks · review_response — template no-op
+│                   guard, NEGATIVE_RATING_MAX
+├── reports.py      monthly_report — _assemble_report_facts, idempotent by period
+├── planning.py     plan_update · diagnosis — _assemble_plan_facts,
+│                   _assemble_diagnosis_facts (dated timeline)
+├── research.py     prompt_research · competitor_bootstrap — task-specific static
+│                   system prompts (not roles)
+└── changes.py      change_set_apply — operations_for_artifact, invert_operations,
+                    APPLY_ENABLED_PLATFORMS + per-platform write seam
+```
+
+The connective tissue: `utils/task_queue.py` (`create_task` = row + job in one
+commit; `task_lifecycle` = the runner wrapper), `adapters/agents/claude_agent.py`
+(`run_role`/`run_agent` — per-turn cost events), `utils/agent_prompts.py` (the
+seven role personas), `utils/agent_json.py` (`parse_agent_json` — the strict-JSON
+output contract every agent runner uses).
+
 ## Quickstart
 
 ```bash

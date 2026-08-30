@@ -64,7 +64,7 @@ async def diagnosis(task_id: str, brand_id: str) -> None:
         trigger = (task.payload or {}).get("trigger", "unspecified")
         trigger_evidence = (task.payload or {}).get("evidence", {})
         brand = await Brand.get(brand_id)
-        facts = await _assemble_diagnosis_facts(brand, trigger, trigger_evidence)
+        facts = await assemble_diagnosis_facts(brand, trigger, trigger_evidence)
 
         diagnosis_markdown = await ClaudeAgent().run_role(
             ROLE_ANALYST,
@@ -144,7 +144,7 @@ def _plan_prompt(brand: Brand, facts: dict) -> str:
 ##############################
 
 
-async def _assemble_diagnosis_facts(brand: Brand, trigger: str, trigger_evidence: dict) -> dict:
+async def assemble_diagnosis_facts(brand: Brand, trigger: str, trigger_evidence: dict) -> dict:
     """The timeline the Analyst reasons over — assembled here, never by the
     agent. Everything is dated so causal claims can carry receipts."""
     today = date.today()
