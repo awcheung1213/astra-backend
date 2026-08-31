@@ -12,3 +12,6 @@ DATABASE_PORT = int(os.environ.get("DATABASE_PORT", "5432"))
 
 # --- app config ---
 CORS_ORIGINS = [origin.strip() for origin in os.environ.get("CORS_ORIGINS", "*").split(",") if origin.strip()]
+
+# --- credentials crypto (sites/connections credentials_encrypted) ---
+TOKEN_ENCRYPTION_KEY = os.environ["TOKEN_ENCRYPTION_KEY"]

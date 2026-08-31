@@ -13,3 +13,6 @@ DATABASE_PORT = int(os.environ.get("DATABASE_PORT", "5432"))
 # --- app config ---
 CORS_ORIGINS = [origin.strip() for origin in os.environ["CORS_ORIGINS"].split(",") if origin.strip()]
 assert CORS_ORIGINS and "*" not in CORS_ORIGINS, "production requires explicit CORS_ORIGINS"
+
+# --- credentials crypto (sites/connections credentials_encrypted) ---
+TOKEN_ENCRYPTION_KEY = os.environ["TOKEN_ENCRYPTION_KEY"]

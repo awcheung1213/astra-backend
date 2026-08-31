@@ -89,7 +89,7 @@ async def schedule_site_audits() -> None:
 @app.task(name="schedule_metrics_ingestion", queue="schedules")
 async def schedule_metrics_ingestion() -> None:
     """#18 (dashboards) — orders/calls/form entries + the trailing week of daily
-    GA4/GSC rows + GSC messages (no push API exists) -> one normalized store.
+    GA4/GSC rows -> one normalized store.
     Runner: worker/tasks/metrics.py task "metrics_ingestion"."""
     count = await _create_task_per_active_brand(name="metrics_ingestion", queue="metrics")
     logger.info(f"[schedules] schedule_metrics_ingestion tick ts={datetime.now()}: {count} ingestions")

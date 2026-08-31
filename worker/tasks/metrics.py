@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta
 import httpx
 from sqlalchemy import select
 
+from adapters.google_adapter import GoogleAdapter
 from objects.brand import Brand
 from objects.connection import Connection
 from objects.finding import SEVERITY_SERIOUS, Finding
@@ -39,6 +40,7 @@ async def metrics_ingestion(task_id: str, brand_id: str) -> None:
 
 
 SYNC_WINDOW_DAYS = 7  # re-pulled every sweep — GA4/GSC data arrives late and revises
+GSC_DATA_LAG_DAYS = 2  # GSC's most recent days are provisional; stop short of them
 
 
 ##############################
@@ -51,21 +53,36 @@ SYNC_WINDOW_DAYS = 7  # re-pulled every sweep — GA4/GSC data arrives late and 
 
 
 async def _sync_gsc(connection: Connection, window_start: date) -> list[dict]:
-    # TODO(#18): Google adapter — Search Console daily clicks/impressions, per
-    #       day and per page (dimension=page url; the decay detector needs it).
-    #       Position is NOT stored — decided 2026-08-29: pre-averaged, sums
-    #       lie, and the AI-visibility score is the product's ranking signal.
-    #       Also pull GSC MESSAGES (no push API exists — this sweep is how we
-    #       ever see them) -> Finding rows with GSC_FINDING_KINDS, deduped by
-    #       message id in detail, auto-resolved when GSC no longer reports
-    #       them; alert_detection rings Pulse on the new ones.
-    return []
+    """Search Console: property-wide daily clicks + impressions, plus per-page
+    daily clicks under the SEPARATE metric name page_clicks — same name as the
+    totals would double-count in totals_for_period. Position is NOT stored
+    (decided 2026-08-29: pre-averaged, sums lie, and the AI-visibility score
+    is the product's ranking signal). GSC finalizes data late, so the window
+    ends 2 days back; next sweep's overlap re-upserts the revisions.
+
+    GSC messages/manual actions are deliberately NOT a feature: the public
+    API doesn't expose them (verified 2026-08-30) — revisit once a real
+    source is designed (forwarded GSC email, or URL-inspection sampling)."""
+    google = GoogleAdapter(connection)
+    window_end = date.today() - timedelta(days=GSC_DATA_LAG_DAYS)
+
+    points = []
+    for daily in await google.search_daily_totals(window_start, window_end):
+        points.append({"source": "gsc", "metric": "clicks", "day": daily["day"], "value": daily["clicks"]})
+        points.append({"source": "gsc", "metric": "impressions", "day": daily["day"], "value": daily["impressions"]})
+    for page_daily in await google.search_daily_clicks_by_page(window_start, window_end):
+        points.append({"source": "gsc", "metric": "page_clicks", "dimension": page_daily["page"], "day": page_daily["day"], "value": page_daily["clicks"]})
+    return points
 
 
 async def _sync_ga4(connection: Connection, window_start: date) -> list[dict]:
-    # TODO(#18): Google adapter — GA4 daily sessions, conversions, and
-    #       key-event counts per day.
-    return []
+    """GA4: daily sessions + key events (GA4's name for conversions)."""
+    google = GoogleAdapter(connection)
+    points = []
+    for daily in await google.analytics_daily(window_start, date.today()):
+        points.append({"source": "ga4", "metric": "sessions", "day": daily["day"], "value": daily["sessions"]})
+        points.append({"source": "ga4", "metric": "key_events", "day": daily["day"], "value": daily["key_events"]})
+    return points
 
 
 async def _sync_calls(connection: Connection, window_start: date) -> list[dict]:
@@ -83,13 +100,9 @@ SYNC_BY_PROVIDER = {"gsc": _sync_gsc, "ga4": _sync_ga4, "calls": _sync_calls}
 # finding kinds each producer OWNS (creates + auto-resolves); the audit's set
 # is AUDIT_KINDS in site_audit.py — a producer never resolves another's kinds
 KIND_SITE_DOWN = "site_down"
-KIND_GSC_MANUAL_ACTION = "gsc_manual_action"
-KIND_GSC_INDEXING_ISSUE = "gsc_indexing_issue"
-GSC_FINDING_KINDS = {KIND_GSC_MANUAL_ACTION, KIND_GSC_INDEXING_ISSUE}
 
 SITE_CHECK_TIMEOUT_SECONDS = 10.0
 ALERT_COOLDOWN_DAYS = 6  # < the weekly cadence, so a FIXED-then-broken condition still alerts
-NEW_FINDING_WINDOW_DAYS = 8  # "new since the last weekly sweep", with slack
 
 TRAFFIC_DROP_THRESHOLD = 0.4  # last week vs the week before
 TRAFFIC_MIN_WEEKLY_CLICKS = 50  # below this, a 40% swing is noise, not news
@@ -99,7 +112,6 @@ DECAY_MIN_BASELINE_CLICKS = 20  # pages that never had traffic can't decay
 MAX_REFRESH_TASKS_PER_SWEEP = 3  # biggest losers first; the rest wait a week
 
 SITE_DOWN_TITLE = "Your site appears to be down"
-MANUAL_ACTION_TITLE = "Google flagged an issue with your site"
 TRAFFIC_DROP_TITLE = "Search traffic dropped sharply this week"
 
 
@@ -129,15 +141,6 @@ async def _site_is_reachable(url: str) -> bool:
     return response.status_code < 500
 
 
-async def _alert_new_gsc_issues(brand: Brand) -> None:
-    """GSC-message findings created by this sweep's ingestion (#18) ring Pulse
-    urgently; old-but-still-open ones already rang."""
-    new_finding_cutoff = datetime.now() - timedelta(days=NEW_FINDING_WINDOW_DAYS)
-    new_gsc_findings = [finding for finding in await Finding.open_for_brand(brand.id) if finding.kind in GSC_FINDING_KINDS and finding.created_at and finding.created_at > new_finding_cutoff]
-    for finding in new_gsc_findings:
-        await Notification.create(organization_id=brand.organization_id, kind=KIND_ALERT, urgency=URGENCY_URGENT, title=MANUAL_ACTION_TITLE, body=finding.summary)
-
-
 async def _detect_traffic_drop(brand: Brand) -> None:
     """An update-shaped change-point: total search clicks down sharply week
     over week -> urgent alert + ONE chained diagnosis (#23)."""
@@ -165,8 +168,8 @@ async def _detect_page_decay(brand: Brand) -> None:
     """Pages whose last week fell far below their own 4-week weekly baseline
     -> ONE chained content_refresh each (#12), biggest losers first."""
     today = date.today()
-    last_week_by_page = await MetricPoint.totals_by_dimension(brand.id, "gsc", "clicks", today - timedelta(days=7), today)
-    baseline_by_page = await MetricPoint.totals_by_dimension(brand.id, "gsc", "clicks", today - timedelta(days=35), today - timedelta(days=7))
+    last_week_by_page = await MetricPoint.totals_by_dimension(brand.id, "gsc", "page_clicks", today - timedelta(days=7), today)
+    baseline_by_page = await MetricPoint.totals_by_dimension(brand.id, "gsc", "page_clicks", today - timedelta(days=35), today - timedelta(days=7))
 
     decayed_pages = []
     for page, baseline_total in baseline_by_page.items():
@@ -194,15 +197,14 @@ async def _alerted_recently(organization_id: str, title: str) -> bool:
 
 @app.task(name="alert_detection", queue="metrics", retry=2)
 async def alert_detection(task_id: str, brand_id: str) -> None:
-    """#19 — pure-code detectors over fresh signals (metric points, findings,
-    one live reachability check) -> urgent Pulse + chained work:
-    content_refresh per decayed page (#12), diagnosis on an update-shaped
-    drop (#23). Every detector guards itself: cooldowns stop a persisting
-    condition from re-ringing weekly, and in-flight checks stop the same
-    chained work from stacking twice."""
+    """#19 — pure-code detectors over fresh signals (metric points, one live
+    reachability check) -> urgent Pulse + chained work: content_refresh per
+    decayed page (#12), diagnosis on an update-shaped drop (#23). Every
+    detector guards itself: cooldowns stop a persisting condition from
+    re-ringing weekly, and in-flight checks stop the same chained work from
+    stacking twice."""
     async with task_lifecycle(task_id):
         brand = await Brand.get(brand_id)
         await _check_site_reachability(brand)
-        await _alert_new_gsc_issues(brand)
         await _detect_traffic_drop(brand)  # -> diagnosis (#23)
         await _detect_page_decay(brand)  # -> content_refresh (#12)

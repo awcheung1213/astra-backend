@@ -47,7 +47,7 @@ built yet — chained/event runners register in the same change as their produce
 | 11 | New content produced & published | `worker/tasks/content.py` `content_draft` *(planned)* — fans out from the APPROVED calendar, never cron |
 | 12 | Existing-page optimization / refresh | `worker/tasks/content.py` `content_refresh` *(planned)* — chained from `alert_detection` |
 | 13 | Link building / digital PR placements | `worker/tasks/outreach.py` `outreach_scout` (`citation_targets` scan) |
-| 14 | GBP management (posts, Q&A, review responses) | `worker/tasks/reputation.py` `gbp_management`; `review_response` *(planned)* — webhook-fired |
+| 14 | GBP management (posts, review responses) | `worker/tasks/reputation.py` `gbp_management` + webhook-fired `review_response`; approval chains `gbp_apply` (Q&A cut — Google killed its API 2025-11) |
 | 15 | Review generation campaign | `worker/tasks/reputation.py` `review_asks` |
 | 16 | Monthly report + walkthrough | `worker/tasks/reports.py` `monthly_report` |
 | 17 | AI visibility / share-of-voice report | `worker/tasks/visibility.py` `visibility_run` (weekly trend point) |
@@ -100,7 +100,7 @@ flowchart LR
         VIS["visibility.py #17<br/>visibility_run<br/>(first run = #6 baseline)"]
         AUD["site_audit.py #3<br/>site_audit<br/>_crawl() → findings diff"]
         ING["metrics.py #18<br/>metrics_ingestion<br/>_sync_gsc/_ga4/_calls()"]
-        DET["metrics.py #19<br/>alert_detection<br/>4 detectors, named thresholds"]
+        DET["metrics.py #19<br/>alert_detection<br/>3 detectors, named thresholds"]
     end
 
     subgraph WORK["PROPOSE — agents, artifacts ONLY"]

@@ -1,0 +1,122 @@
+"""Google read adapter — Search Console + GA4, the metrics sweep's source.
+
+Auth: OAuth2 refresh tokens, exchanged for a short-lived access token per
+adapter instance. Encrypted credentials shape on the connection row:
+- gsc:  {"refresh_token": ..., "site_url": "sc-domain:example.com" or "https://example.com/"}
+- ga4:  {"refresh_token": ..., "property_id": "123456789"}
+The OAuth app itself is GOOGLE_OAUTH_CLIENT_ID/SECRET from settings; the
+consent flow that PUTS refresh tokens on connection rows is onboarding-side
+work that does not exist yet — rows are dev-seeded until it does.
+
+These are free read APIs: no cost events (cost events are written manually
+at spend sites; a $0 read has none).
+
+The public Search Console API exposes neither messages nor manual actions
+(verified 2026-08-30) — GSC messages are deliberately NOT a feature until a
+real source is designed."""
+
+from datetime import date, datetime
+from urllib.parse import quote
+
+import httpx
+
+import settings
+from objects.connection import Connection
+from utils.token_crypto import decrypt_credentials
+
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GSC_API_BASE = "https://searchconsole.googleapis.com/webmasters/v3"
+GA4_API_BASE = "https://analyticsdata.googleapis.com/v1beta"
+READ_TIMEOUT_SECONDS = 30.0
+GSC_ROW_LIMIT = 25000  # per-page daily rows for a week fit comfortably
+
+
+class GoogleReadError(Exception):
+    """A Google read failed. Propagates out of metrics_ingestion so
+    procrastinate retries (upserts make retries safe); exhausted retries
+    dead-letter to the operator."""
+
+
+async def fetch_google_access_token(client: httpx.AsyncClient, refresh_token: str) -> str:
+    """Refresh-token -> short-lived access token, shared by every Google
+    adapter (GSC/GA4 reads here, GBP writes in adapters/gbp_adapter.py)."""
+    if not settings.GOOGLE_OAUTH_CLIENT_ID:
+        raise GoogleReadError("GOOGLE_OAUTH_CLIENT_ID/SECRET not configured")
+    try:
+        response = await client.post(GOOGLE_TOKEN_URL, data={"client_id": settings.GOOGLE_OAUTH_CLIENT_ID, "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET, "refresh_token": refresh_token, "grant_type": "refresh_token"})
+    except httpx.HTTPError as error:
+        raise GoogleReadError(f"google token refresh failed: {error}") from error
+    if response.status_code >= 400:
+        raise GoogleReadError(f"google token refresh -> {response.status_code}: {response.text[:200]}")
+    return response.json()["access_token"]
+
+
+class GoogleAdapter:
+    def __init__(self, connection: Connection) -> None:
+        credentials = decrypt_credentials(connection.credentials_encrypted or "")
+        self.refresh_token = credentials["refresh_token"]
+        self.gsc_site_url = credentials.get("site_url")
+        self.ga4_property_id = credentials.get("property_id")
+        self._access_token: str | None = None
+
+    ##############################
+    # SEARCH CONSOLE
+    ##############################
+
+    async def search_daily_totals(self, start_day: date, end_day: date) -> list[dict]:
+        """Property-wide daily clicks + impressions: [{day, clicks, impressions}]."""
+        rows = await self._gsc_query(start_day, end_day, dimensions=["date"])
+        return [{"day": date.fromisoformat(row["keys"][0]), "clicks": row.get("clicks", 0), "impressions": row.get("impressions", 0)} for row in rows]
+
+    async def search_daily_clicks_by_page(self, start_day: date, end_day: date) -> list[dict]:
+        """Per-page daily clicks (the decay detector's food): [{day, page, clicks}]."""
+        rows = await self._gsc_query(start_day, end_day, dimensions=["date", "page"])
+        return [{"day": date.fromisoformat(row["keys"][0]), "page": row["keys"][1], "clicks": row.get("clicks", 0)} for row in rows]
+
+    async def _gsc_query(self, start_day: date, end_day: date, dimensions: list[str]) -> list[dict]:
+        if not self.gsc_site_url:
+            raise GoogleReadError("connection has no GSC site_url")
+        body = {"startDate": start_day.isoformat(), "endDate": end_day.isoformat(), "dimensions": dimensions, "rowLimit": GSC_ROW_LIMIT}
+        payload = await self._request("POST", f"{GSC_API_BASE}/sites/{quote(self.gsc_site_url, safe='')}/searchAnalytics/query", body)
+        return payload.get("rows", [])
+
+    ##############################
+    # GA4
+    ##############################
+
+    async def analytics_daily(self, start_day: date, end_day: date) -> list[dict]:
+        """Daily sessions + key events: [{day, sessions, key_events}]."""
+        if not self.ga4_property_id:
+            raise GoogleReadError("connection has no GA4 property_id")
+        body = {
+            "dateRanges": [{"startDate": start_day.isoformat(), "endDate": end_day.isoformat()}],
+            "dimensions": [{"name": "date"}],
+            "metrics": [{"name": "sessions"}, {"name": "keyEvents"}],
+        }
+        payload = await self._request("POST", f"{GA4_API_BASE}/properties/{self.ga4_property_id}:runReport", body)
+        daily = []
+        for row in payload.get("rows", []):
+            day = datetime.strptime(row["dimensionValues"][0]["value"], "%Y%m%d").date()
+            metric_values = row.get("metricValues", [])
+            daily.append({"day": day, "sessions": float(metric_values[0]["value"]), "key_events": float(metric_values[1]["value"])})
+        return daily
+
+    ##############################
+    # PLUMBING
+    ##############################
+
+    async def _request(self, method: str, url: str, json_body: dict) -> dict:
+        async with httpx.AsyncClient(timeout=READ_TIMEOUT_SECONDS) as client:
+            access_token = await self._fetch_access_token(client)
+            try:
+                response = await client.request(method, url, json=json_body, headers={"Authorization": f"Bearer {access_token}"})
+            except httpx.HTTPError as error:
+                raise GoogleReadError(f"google {method} {url} failed: {error}") from error
+        if response.status_code >= 400:
+            raise GoogleReadError(f"google {method} {url} -> {response.status_code}: {response.text[:200]}")
+        return response.json()
+
+    async def _fetch_access_token(self, client: httpx.AsyncClient) -> str:
+        if self._access_token is None:
+            self._access_token = await fetch_google_access_token(client, self.refresh_token)
+        return self._access_token

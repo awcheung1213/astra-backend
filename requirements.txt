@@ -12,3 +12,4 @@ sqlalchemy[asyncio]==2.0.52
 sqlmodel==0.0.39
 starlette==1.6.0
 uvicorn==0.52.4
+markdown==3.8

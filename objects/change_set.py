@@ -71,16 +71,17 @@ class ChangeSet(SQLModel, BaseObject, table=True):
         await Database.session.flush()
 
     @staticmethod
-    async def mark_operation_complete(id: str, operation_id: str, previous_value) -> None:
-        """Stamp ONE operation's completion marker (+ the rollback record the
-        adapter read before writing). Assigns a NEW list so the JSONB change
-        is detected. The caller commits — the marker must survive a later
-        op's failure, or a retried apply would repeat this op."""
+    async def mark_operation_complete(id: str, operation_id: str, apply_result: dict) -> None:
+        """Stamp ONE operation's completion marker + what the adapter reported:
+        previous_value (the rollback record) and created_ref (anything the op
+        created — how a publish gets unpublished). Assigns a NEW list so the
+        JSONB change is detected. The caller commits — the marker must survive
+        a later op's failure, or a retried apply would repeat this op."""
         change_set = await ChangeSet.get(id)
         updated_operations = []
         for operation in change_set.operations:
             if operation.get("id") == operation_id:
-                operation = {**operation, "previous_value": previous_value, "completed_at": datetime.now().isoformat()}
+                operation = {**operation, "previous_value": apply_result.get("previous_value"), "created_ref": apply_result.get("created_ref"), "completed_at": datetime.now().isoformat()}
             updated_operations.append(operation)
         change_set.operations = updated_operations
         Database.session.add(change_set)

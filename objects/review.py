@@ -48,6 +48,17 @@ class Review(SQLModel, BaseObject, table=True):
         return review
 
     @staticmethod
+    async def mark_replied(id: str) -> None:
+        """Stamp the moment the approved reply actually went live on the
+        platform — the gbp_apply idempotency guard."""
+        review = await Database.session.get(Review, id)
+        if review is None:
+            raise ReviewNotFound()
+        review.replied_at = datetime.now()
+        Database.session.add(review)
+        await Database.session.flush()
+
+    @staticmethod
     async def link_reply(id: str, reply_artifact_id: str) -> None:
         """Point the review at its drafted reply. replied_at stays NULL until
         the approved reply actually posts (the GBP adapter's job)."""

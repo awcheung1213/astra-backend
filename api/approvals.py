@@ -75,11 +75,15 @@ async def _fan_out_approval(artifact: Artifact, approved_rows: list[int] | None)
         #       workstream schema needs a marker field first).
         return ["prompt_research"]
 
-    if artifact.type in ("change_proposal", "draft", "gbp_touches", "reply"):
+    if artifact.type in ("gbp_touches", "reply"):
+        # GBP work goes live via the GBP adapter, not the site engine
+        await create_task(brand_id=artifact.brand_id, name="gbp_apply", queue="reputation", payload={"artifact_id": artifact.id})
+        return ["gbp_apply"]
+
+    if artifact.type in ("change_proposal", "draft"):
         operations = operations_for_artifact(artifact)
         if operations is None:
-            # prose judgment proposals and GBP work (which needs the GBP
-            # adapter, not the CMS one) — approval recorded, a human applies
+            # prose judgment proposals — approval recorded, a human applies
             logger.info(f"[approvals] artifact {artifact.id} ({artifact.type}) approved — no mechanical form, apply by hand")
             return []
         site = await Site.by_brand(artifact.brand_id)
