@@ -47,7 +47,23 @@ LEDGER_WINDOW_DAYS = 31  # "shipped this month"
 async def brands() -> dict:
     """Brand discovery for the FE. NO AUTH YET: lists every brand — becomes
     the signed-in org's brands when the auth port lands."""
-    return {"brands": [{"id": brand.id, "name": brand.name, "website_url": brand.website_url, "footprint": brand.footprint, "organization_id": brand.organization_id} for brand in await Brand.all()]}
+    return {
+        "brands": [
+            {
+                "id": brand.id,
+                "name": brand.name,
+                "website_url": brand.website_url,
+                "footprint": brand.footprint,
+                "organization_id": brand.organization_id,
+                "platform": brand.platform,
+                "description": brand.description,
+                "category": brand.category,
+                "audience": brand.audience,
+                "differentiators": brand.differentiators,
+            }
+            for brand in await Brand.all()
+        ]
+    }
 
 
 @router.get("/brands/{brand_id}/overview")
@@ -79,7 +95,7 @@ async def overview(brand_id: str) -> dict:
     first_of_this_month = date.today().replace(day=1)
     first_of_last_month = (first_of_this_month - timedelta(days=1)).replace(day=1)
     return {
-        "brand": {"id": brand.id, "name": brand.name, "website_url": brand.website_url, "footprint": brand.footprint},
+        "brand": {"id": brand.id, "name": brand.name, "website_url": brand.website_url, "footprint": brand.footprint, "platform": brand.platform, "description": brand.description, "category": brand.category, "audience": brand.audience, "differentiators": brand.differentiators},
         "competitors": [competitor.name for competitor in await Competitor.get_competitors_by_brand_id(brand.id)],
         "brief": {"markdown": latest_brief.content.get("markdown"), "created_at": latest_brief.created_at.isoformat()} if latest_brief else None,
         "visibility": visibility,
@@ -138,7 +154,9 @@ async def worklog(brand_id: str) -> dict:
         "running": [{"id": task.id, "name": task.name, "started": task.created_at.isoformat()} for task in machine_tasks if task.status == STATUS_RUNNING],
         "queued": [{"id": task.id, "name": task.name} for task in machine_tasks if task.status == STATUS_QUEUED],
         "shipped": [{"id": task.id, "name": task.name, "finished_at": task.finished_at.isoformat()} for task in done_tasks],
-        "change_sets": [{"id": change_set.id, "status": change_set.status, "operation_count": len(change_set.operations), "applied_at": change_set.applied_at.isoformat() if change_set.applied_at else None, "reverted_by": change_set.reverted_by_change_set_id} for change_set in await ChangeSet.for_brand(brand_id)],
+        "change_sets": [
+            {"id": change_set.id, "status": change_set.status, "operation_count": len(change_set.operations), "applied_at": change_set.applied_at.isoformat() if change_set.applied_at else None, "reverted_by": change_set.reverted_by_change_set_id} for change_set in await ChangeSet.for_brand(brand_id)
+        ],
     }
 
 
@@ -158,7 +176,17 @@ async def approvals(brand_id: str) -> dict:
 async def artifact_detail(artifact_id: str) -> dict:
     """Full artifact for detail views ('Read full draft', Pulse links)."""
     artifact = await Artifact.get(artifact_id)
-    return {"id": artifact.id, "brand_id": artifact.brand_id, "type": artifact.type, "status": artifact.status, "content": artifact.content, "evidence": artifact.evidence, "created_at": artifact.created_at.isoformat(), "reviewed_by": artifact.reviewed_by, "reviewed_at": artifact.reviewed_at.isoformat() if artifact.reviewed_at else None}
+    return {
+        "id": artifact.id,
+        "brand_id": artifact.brand_id,
+        "type": artifact.type,
+        "status": artifact.status,
+        "content": artifact.content,
+        "evidence": artifact.evidence,
+        "created_at": artifact.created_at.isoformat(),
+        "reviewed_by": artifact.reviewed_by,
+        "reviewed_at": artifact.reviewed_at.isoformat() if artifact.reviewed_at else None,
+    }
 
 
 @router.get("/brands/{brand_id}/roadmap")
@@ -180,7 +208,16 @@ async def pulse(organization_id: str, limit: int = 50) -> dict:
     """The Pulse feed, newest first."""
     return {
         "items": [
-            {"id": notification.id, "kind": notification.kind, "urgency": notification.urgency, "title": notification.title, "body": notification.body, "link_ref": notification.link_ref, "read_at": notification.read_at.isoformat() if notification.read_at else None, "created_at": notification.created_at.isoformat()}
+            {
+                "id": notification.id,
+                "kind": notification.kind,
+                "urgency": notification.urgency,
+                "title": notification.title,
+                "body": notification.body,
+                "link_ref": notification.link_ref,
+                "read_at": notification.read_at.isoformat() if notification.read_at else None,
+                "created_at": notification.created_at.isoformat(),
+            }
             for notification in await Notification.for_organization(organization_id, limit=limit)
         ]
     }
