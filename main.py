@@ -41,6 +41,7 @@ app.add_middleware(
 # routers register here as resources land (api/organizations.py, api/brands.py, ...)
 from api.approvals import router as approvals_router  # noqa: E402
 from api.ask import router as ask_router  # noqa: E402
+from api.competitors import router as competitors_router  # noqa: E402
 from api.onboarding import router as onboarding_router  # noqa: E402
 from api.prompts import router as prompts_router  # noqa: E402
 from api.reads import router as reads_router  # noqa: E402
@@ -48,6 +49,7 @@ from api.webhooks import router as webhooks_router  # noqa: E402
 
 app.include_router(approvals_router)
 app.include_router(ask_router)
+app.include_router(competitors_router)
 app.include_router(onboarding_router)
 app.include_router(prompts_router)
 app.include_router(reads_router)

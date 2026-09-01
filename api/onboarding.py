@@ -2,8 +2,14 @@
 #4/#5/#8 (see the deliverables index in README.md).
 
 Not cron work: everything here fires ONCE per brand from API events. The UI
-order is welcome -> org -> brand -> interview -> launch, so by launch time the
-brand context is already extraction-filled and client-confirmed.
+creates resources as it learns enough to: signup fires once coverage is known
+(name + site + footprint), the interview submit follows immediately, and
+launch closes the flow with the goal. Each enqueue has exactly ONE owner, so
+no dedupe checks are needed: the interview owns the research pair (research
+grounds in the extraction, so it fires when the interview lands — at signup
+time normally, or later from Tasks if it was skipped, which the daily chase
+nags for), and launch owns plan_update + site_audit + the client-task rows,
+single-shot behind its 409.
 
 NO AUTH YET (repo-wide) — port utils/token_verifier.py + utils/authz.py from
 geoviz-backend before these endpoints face the internet."""
@@ -18,18 +24,25 @@ from objects.brand import Brand
 from objects.goal import Goal
 from objects.organization import Organization
 from objects.task import STATUS_DONE, Task
-from schemas.onboarding_schemas import InterviewRequest, InterviewResponse, LaunchResponse, SignupRequest, SignupResponse
+from schemas.onboarding_schemas import InterviewRequest, InterviewResponse, LaunchRequest, LaunchResponse, SignupRequest, SignupResponse
 from utils.agent_prompts import ROLE_ACCOUNT_MANAGER
 from utils.database import Database
 from utils.task_queue import create_task
 
 router = APIRouter(prefix="/api/v1")
 
-# name -> queue: the internal work launch enqueues (#4, #5, #8)
-KICKOFF_WORK = (
+# name -> queue, one owner each. The interview enqueues the research pair
+# (its extraction is exactly what the researchers ground in, and firing them
+# there puts real competitors + questions on the wizard's review step);
+# launch enqueues the rest (#8, and the first #3 sweep — the crawler needs
+# only website_url, no connected site).
+RESEARCH_WORK = (
     ("prompt_research", "research"),
     ("competitor_bootstrap", "research"),
+)
+LAUNCH_WORK = (
     ("plan_update", "planning"),
+    ("site_audit", "audit"),
 )
 
 # launch's slice of briefs.CLIENT_TASK_NAMES (the chase vocabulary)
@@ -59,13 +72,18 @@ async def signup(request: SignupRequest) -> SignupResponse:
 
 
 @router.post("/brands/{brand_id}/launch", response_model=LaunchResponse)
-async def launch(brand_id: str) -> LaunchResponse:
-    """Once per brand: create the client-contribution rows (#1/#7 — no queue
-    job, the daily chase nags them) and enqueue the kickoff work (#4/#5/#8).
-    409 on a second launch."""
+async def launch(brand_id: str, request: LaunchRequest | None = None) -> LaunchResponse:
+    """Once per brand: record the goal (chosen after signup), create the
+    client-contribution rows (#1/#7 — no queue job, the daily chase nags
+    them), and enqueue launch's own kickoff work (#3/#8 — the research pair
+    is the interview's, never launch's). 409 on a second launch."""
     brand = await Brand.get(brand_id)
     if brand.onboarded_at is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="brand already launched")
+
+    if request and request.goal_metric and request.goal_target:
+        Database.session.add(Goal(brand_id=brand.id, metric=request.goal_metric, target=request.goal_target))
+        await Database.session.flush()
 
     # bare rows, deliberately NOT create_task: these are completed by the
     # CLIENT, never a worker — a queue job would dead-letter (no runner by
@@ -73,11 +91,17 @@ async def launch(brand_id: str) -> LaunchResponse:
     # client (the daily chase nags), done = delivered. Launch creates its OWN
     # subset of the chase vocabulary — other producers (plan approval's
     # collect_study_data) add theirs when the work actually calls for it.
+    # answer_sme_interview is skipped when the interview already happened —
+    # launch must never nag for what the wizard collected minutes earlier.
+    client_tasks_created = []
     for client_task_name in ONBOARDING_CLIENT_TASKS:
+        if client_task_name == "answer_sme_interview" and brand.interview_raw:
+            continue
         Database.session.add(Task(brand_id=brand.id, name=client_task_name))
+        client_tasks_created.append(client_task_name)
     await Database.session.flush()
 
-    for work_name, work_queue in KICKOFF_WORK:
+    for work_name, work_queue in LAUNCH_WORK:
         await create_task(brand_id=brand.id, name=work_name, queue=work_queue)
 
     # #6 — the baseline is the normal weekly machinery started early: the
@@ -87,14 +111,17 @@ async def launch(brand_id: str) -> LaunchResponse:
     #       adapter; until then only the client verification task row exists.
 
     await Brand.update(brand.id, onboarded_at=datetime.now())
-    return LaunchResponse.create({"brand_id": brand.id, "client_tasks": list(ONBOARDING_CLIENT_TASKS), "queued_work": [work_name for work_name, _ in KICKOFF_WORK]})
+    return LaunchResponse.create({"brand_id": brand.id, "client_tasks": client_tasks_created, "queued_work": [work_name for work_name, _ in LAUNCH_WORK]})
 
 
 @router.post("/brands/{brand_id}/interview", response_model=InterviewResponse)
 async def interview(brand_id: str, request: InterviewRequest) -> InterviewResponse:
     """#2 — store the AM-conducted interview verbatim, extract the brand
-    context from it (agent, no tools), and mark the answer_sme_interview
-    client task done so the chase stops nagging. The response is the
+    context from it (agent, no tools), mark the answer_sme_interview client
+    task done so the chase stops nagging, and kick off the research pair —
+    the extraction is exactly what competitor_bootstrap and prompt_research
+    ground in, and firing them here (not at launch) is what puts real
+    competitors + questions on the wizard's review step. The response is the
     extraction for the client to confirm."""
     brand = await Brand.get(brand_id)
 
@@ -121,6 +148,9 @@ async def interview(brand_id: str, request: InterviewRequest) -> InterviewRespon
     interview_task = await Task.first_queued(brand.id, "answer_sme_interview")
     if interview_task is not None:
         await Task.update_status(interview_task.id, STATUS_DONE)
+
+    for work_name, work_queue in RESEARCH_WORK:
+        await create_task(brand_id=brand.id, name=work_name, queue=work_queue)
 
     return InterviewResponse.create({"brand_id": brand.id, **context})
 

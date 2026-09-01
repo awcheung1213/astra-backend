@@ -15,6 +15,14 @@ class SignupResponse(BaseResponse):
     brand_id: str
 
 
+class LaunchRequest(BaseRequest):
+    """Launch-time preferences: the goal is chosen on the wizard's later
+    pages, after signup (which fires when coverage is known) already ran."""
+
+    goal_metric: str | None = None  # leads | revenue
+    goal_target: float | None = None
+
+
 class LaunchResponse(BaseResponse):
     brand_id: str
     client_tasks: list[str]  # #1/#7 — rows the client must complete (chased daily)
