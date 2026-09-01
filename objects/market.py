@@ -69,17 +69,6 @@ class Market(SQLModel, BaseObject, table=True):
         return list(rows.scalars().all())
 
     @staticmethod
-    async def search(query: str, limit: int = 10) -> list["Market"]:
-        """City-prefix typeahead over the shared active rows — the wizard's
-        coverage step. Biggest cities first so 'pho' leads with Phoenix."""
-        if not query.strip():
-            return []
-        rows = await ReplicaDatabase.session.execute(
-            select(Market).where(Market.brand_id.is_(None), Market.is_active == True, Market.collection_market_id.is_(None), Market.city.ilike(f"{query.strip()}%")).order_by(Market.population.desc().nulls_last(), Market.city).limit(limit)  # type: ignore # noqa: E712
-        )
-        return list(rows.scalars().all())
-
-    @staticmethod
     async def get_or_create_city(city: str, state: str) -> "Market":
         """ONE row per physical city (the corpus dedup invariant), three
         layers deep: case-insensitive lookup first (keeping the existing

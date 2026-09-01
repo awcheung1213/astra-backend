@@ -78,12 +78,3 @@ async def test_local_signup_validation(client):
     assert (await _signup(client, footprint="local", cities=[f"{_city()}, AZ" for _ in range(26)])).status_code == 422  # over the cap
     # national signups ignore the cities field entirely
     assert (await _signup(client, footprint="national", cities=["not even a city"])).status_code == 200
-
-
-async def test_market_typeahead(client):
-    city = _city()
-    assert (await _signup(client, footprint="local", cities=[f"{city}, ID"])).status_code == 200
-
-    matches = (await client.get("/api/v1/markets", params={"q": city[:14]})).json()["markets"]
-    assert {"city": city, "state": "ID"} in matches
-    assert (await client.get("/api/v1/markets", params={"q": ""})).json()["markets"] == []
