@@ -1,13 +1,13 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, func
+from sqlalchemy import Column, DateTime, ForeignKey, String, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from exceptions.exceptions import ChangeSetNotFound
 from objects.base_object import BaseObject
-from utils.database import Database
+from utils.database import Database, ReplicaDatabase
 
 STATUS_PENDING = "pending"
 STATUS_APPLYING = "applying"
@@ -59,6 +59,12 @@ class ChangeSet(SQLModel, BaseObject, table=True):
             change_set.applied_at = datetime.now()
         Database.session.add(change_set)
         await Database.session.flush()
+
+    @staticmethod
+    async def for_brand(brand_id: str, limit: int = 50) -> list["ChangeSet"]:
+        """Newest-first — the shipped-changes ledger."""
+        rows = await ReplicaDatabase.session.execute(select(ChangeSet).where(ChangeSet.brand_id == brand_id).order_by(ChangeSet.created_at.desc()).limit(limit))  # type: ignore
+        return list(rows.scalars().all())
 
     @staticmethod
     async def mark_reverted(id: str, reverted_by_change_set_id: str) -> None:

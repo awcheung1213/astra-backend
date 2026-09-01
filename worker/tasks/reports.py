@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta
 
 from adapters.agents.claude_agent import ClaudeAgent
 from objects.brand import Brand
+from objects.change_set import ChangeSet
 from objects.finding import Finding
 from objects.metric_point import MetricPoint
 from objects.notification import KIND_UPDATE, Notification
@@ -77,9 +78,8 @@ async def _assemble_report_facts(brand: Brand, period: date) -> dict:
 
     open_findings = await Finding.open_for_brand(brand.id)
     resolved_findings = await Finding.resolved_since(brand.id, since=period)
+    applied_change_sets = [change_set for change_set in await ChangeSet.for_brand(brand.id) if change_set.applied_at and period <= change_set.applied_at.date() < period_end]
 
-    # TODO(#16): add shipped change sets once the change-set engine lands —
-    #       "what we changed on your site" is the report's strongest section.
     return {
         "period": period.isoformat(),
         "visibility": visibility,
@@ -88,6 +88,7 @@ async def _assemble_report_facts(brand: Brand, period: date) -> dict:
             "resolved_this_month": [{"kind": finding.kind, "summary": finding.summary} for finding in resolved_findings],
         },
         "work_shipped": await completed_task_counts(brand.id, since=datetime(period.year, period.month, 1)),
+        "site_changes_applied": [{"applied_at": change_set.applied_at.date().isoformat(), "operations": [f"{operation['op']}:{operation.get('field') or 'page'}" for operation in change_set.operations]} for change_set in applied_change_sets],
         "traffic_and_conversions": await MetricPoint.totals_for_period(brand.id, period, period_end) or "no metrics ingested yet",
         "waiting_on_client": [{"task": client_task.name, "days_waiting": (datetime.now() - client_task.created_at).days} for client_task in await overdue_client_tasks(brand.id)],
     }

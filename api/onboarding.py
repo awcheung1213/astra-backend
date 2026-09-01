@@ -15,12 +15,13 @@ from fastapi import APIRouter, HTTPException, status
 
 from adapters.agents.claude_agent import ClaudeAgent
 from objects.brand import Brand
+from objects.goal import Goal
+from objects.organization import Organization
 from objects.task import STATUS_DONE, Task
-from schemas.onboarding_schemas import InterviewRequest, InterviewResponse, LaunchResponse
+from schemas.onboarding_schemas import InterviewRequest, InterviewResponse, LaunchResponse, SignupRequest, SignupResponse
 from utils.agent_prompts import ROLE_ACCOUNT_MANAGER
 from utils.database import Database
 from utils.task_queue import create_task
-from worker.tasks.briefs import CLIENT_TASK_NAMES
 
 router = APIRouter(prefix="/api/v1")
 
@@ -30,6 +31,31 @@ KICKOFF_WORK = (
     ("competitor_bootstrap", "research"),
     ("plan_update", "planning"),
 )
+
+# launch's slice of briefs.CLIENT_TASK_NAMES (the chase vocabulary)
+ONBOARDING_CLIENT_TASKS = ("answer_sme_interview", "grant_access", "upload_photos", "verify_conversion_tracking")
+
+
+@router.post("/onboarding/signup", response_model=SignupResponse)
+async def signup(request: SignupRequest) -> SignupResponse:
+    """Step 0 — the rows everything else hangs off: organization + brand
+    (+ the goal when one was set). NO AUTH YET: no user/membership rows —
+    those arrive with the auth port."""
+    brand_name = request.brand_name.strip()
+    website_url = request.website_url.strip()
+    if not brand_name or not website_url:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="brand_name and website_url are required")
+    if not website_url.startswith("http"):
+        website_url = f"https://{website_url}"
+
+    organization = await Organization.create(name=request.organization_name.strip() or brand_name)
+    brand = Brand(organization_id=organization.id, name=brand_name, website_url=website_url, footprint=request.footprint)
+    Database.session.add(brand)
+    await Database.session.flush()
+    if request.goal_metric and request.goal_target:
+        Database.session.add(Goal(brand_id=brand.id, metric=request.goal_metric, target=request.goal_target))
+        await Database.session.flush()
+    return SignupResponse.create({"organization_id": organization.id, "brand_id": brand.id})
 
 
 @router.post("/brands/{brand_id}/launch", response_model=LaunchResponse)
@@ -44,8 +70,10 @@ async def launch(brand_id: str) -> LaunchResponse:
     # bare rows, deliberately NOT create_task: these are completed by the
     # CLIENT, never a worker — a queue job would dead-letter (no runner by
     # these names). The row IS the mechanism: status queued = waiting on the
-    # client (the daily chase nags), done = delivered.
-    for client_task_name in sorted(CLIENT_TASK_NAMES):
+    # client (the daily chase nags), done = delivered. Launch creates its OWN
+    # subset of the chase vocabulary — other producers (plan approval's
+    # collect_study_data) add theirs when the work actually calls for it.
+    for client_task_name in ONBOARDING_CLIENT_TASKS:
         Database.session.add(Task(brand_id=brand.id, name=client_task_name))
     await Database.session.flush()
 
@@ -59,7 +87,7 @@ async def launch(brand_id: str) -> LaunchResponse:
     #       adapter; until then only the client verification task row exists.
 
     await Brand.update(brand.id, onboarded_at=datetime.now())
-    return LaunchResponse.create({"brand_id": brand.id, "client_tasks": sorted(CLIENT_TASK_NAMES), "queued_work": [work_name for work_name, _ in KICKOFF_WORK]})
+    return LaunchResponse.create({"brand_id": brand.id, "client_tasks": list(ONBOARDING_CLIENT_TASKS), "queued_work": [work_name for work_name, _ in KICKOFF_WORK]})
 
 
 @router.post("/brands/{brand_id}/interview", response_model=InterviewResponse)

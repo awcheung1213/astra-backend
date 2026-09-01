@@ -29,6 +29,17 @@ class CompetitorMention(SQLModel, BaseObject, table=True):
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
 
     @staticmethod
+    async def counts_for_run(visibility_run_id: str) -> dict[str, int]:
+        """Mentions per competitor across one run's scored answers — the
+        share-of-voice breakdown the Results page draws as bars."""
+        from objects.prompt_result import PromptResult
+
+        rows = await ReplicaDatabase.session.execute(
+            select(CompetitorMention.competitor_name, func.count()).join(PromptResult, PromptResult.id == CompetitorMention.prompt_result_id).where(PromptResult.visibility_run_id == visibility_run_id).group_by(CompetitorMention.competitor_name)  # type: ignore
+        )
+        return {competitor_name: count for competitor_name, count in rows}
+
+    @staticmethod
     async def get(id: str) -> "CompetitorMention":
         mention = await ReplicaDatabase.session.get(CompetitorMention, id)
         if not mention:

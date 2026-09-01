@@ -15,7 +15,9 @@ from fastapi import APIRouter, HTTPException, status
 from objects.artifact import STATUS_APPROVED, STATUS_PENDING_REVIEW, STATUS_REJECTED, Artifact
 from objects.change_set import STATUS_APPLIED, ChangeSet
 from objects.site import Site
+from objects.task import Task
 from schemas.approval_schemas import DECISION_APPROVE, DECISION_REJECT, RevertResponse, ReviewRequest, ReviewResponse
+from utils.database import Database
 from utils.logger import logger
 from utils.task_queue import create_task
 from worker.tasks.changes import APPLY_ENABLED_PLATFORMS, invert_operations, operations_for_artifact
@@ -70,10 +72,16 @@ async def _fan_out_approval(artifact: Artifact, approved_rows: list[int] | None)
     if artifact.type == "plan":
         # an approved roadmap re-grounds the target query list (#4 re-run)
         await create_task(brand_id=artifact.brand_id, name="prompt_research", queue="research")
-        # TODO(#25): when a workstream calls for an original data study, fan out
-        #       the client-contribution data-collection task rows here (the
-        #       workstream schema needs a marker field first).
-        return ["prompt_research"]
+        # #25 — workstreams the Strategist marked as needing client-collected
+        # data become bare client-contribution rows (no queue job; the daily
+        # chase nags them; the study write-up rides content_draft once the
+        # data arrives)
+        study_workstreams = [workstream for workstream in artifact.content.get("workstreams", []) if workstream.get("needs_client_data")]
+        for workstream in study_workstreams:
+            Database.session.add(Task(brand_id=artifact.brand_id, name="collect_study_data", payload={"workstream": workstream.get("name")}))
+        if study_workstreams:
+            await Database.session.flush()
+        return ["prompt_research"] + ["collect_study_data"] * len(study_workstreams)
 
     if artifact.type in ("gbp_touches", "reply"):
         # GBP work goes live via the GBP adapter, not the site engine

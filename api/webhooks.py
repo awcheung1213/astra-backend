@@ -45,3 +45,17 @@ async def review_webhook(request: ReviewWebhookRequest) -> ReviewWebhookResponse
     )
     await create_task(brand_id=brand.id, name="review_response", queue="reputation", payload={"review_id": review.id})
     return ReviewWebhookResponse.create({"review_id": review.id, "queued_work": ["review_response"]})
+
+
+# TODO(leads: orders) POST /webhooks/shopify_orders — the FIRST lead producer,
+#       lands HERE: Shopify orders/create webhook -> one Lead row
+#       (kind="order", value_usd from total, landing_path + channel classified
+#       from the payload's landing_site/referring_site — chatgpt.com etc ->
+#       ai_referral, google organic -> organic; unknown -> direct and we DON'T
+#       claim it, attribution is a floor not a ceiling). Verify the webhook
+#       HMAC with the site's Shopify secret. Unlocks api/reads.py's
+#       attribution rollup end-to-end for Shopify brands.
+# TODO(leads: calls) call-tracking webhook -> Lead(kind="call") — waits on the
+#       call-tracking vendor decision (build plan section A).
+# TODO(leads: forms) form-fill webhook -> Lead(kind="form") — needs the
+#       tracking snippet on the client site (FE/site-side work) first.

@@ -2,11 +2,12 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Column, DateTime, ForeignKey, Numeric, String, func
+from sqlalchemy import Column, DateTime, ForeignKey, Numeric, String, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils.database import ReplicaDatabase
 
 KIND_CALL = "call"
 KIND_FORM = "form"
@@ -29,3 +30,9 @@ class Lead(SQLModel, BaseObject, table=True):
     occurred_at: datetime = Field(sa_column=Column(DateTime, nullable=False))
     meta: dict = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False, server_default="{}"))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+
+    @staticmethod
+    async def for_brand(brand_id: str, limit: int = 100) -> list["Lead"]:
+        """Newest-first — the leads/orders list."""
+        rows = await ReplicaDatabase.session.execute(select(Lead).where(Lead.brand_id == brand_id).order_by(Lead.occurred_at.desc()).limit(limit))  # type: ignore
+        return list(rows.scalars().all())

@@ -33,6 +33,16 @@ class Report(SQLModel, BaseObject, table=True):
         return report
 
     @staticmethod
+    async def get(id: str) -> "Report | None":
+        return await ReplicaDatabase.session.get(Report, id)
+
+    @staticmethod
+    async def for_brand(brand_id: str) -> list["Report"]:
+        """Newest-first — the report archive."""
+        rows = await ReplicaDatabase.session.execute(select(Report).where(Report.brand_id == brand_id).order_by(Report.period.desc()))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
     async def for_period(brand_id: str, period: date) -> "Report | None":
         rows = await ReplicaDatabase.session.execute(select(Report).where(Report.brand_id == brand_id).where(Report.period == period).limit(1))
         return rows.scalars().first()

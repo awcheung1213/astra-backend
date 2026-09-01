@@ -73,6 +73,12 @@ class GoogleAdapter:
         rows = await self._gsc_query(start_day, end_day, dimensions=["date", "page"])
         return [{"day": date.fromisoformat(row["keys"][0]), "page": row["keys"][1], "clicks": row.get("clicks", 0)} for row in rows]
 
+    async def search_top_queries(self, start_day: date, end_day: date, limit: int = 100) -> list[dict]:
+        """The real queries people used, best first (GSC sorts by clicks):
+        [{query, clicks, impressions}] — prompt research's demand grounding."""
+        rows = await self._gsc_query(start_day, end_day, dimensions=["query"])
+        return [{"query": row["keys"][0], "clicks": row.get("clicks", 0), "impressions": row.get("impressions", 0)} for row in rows[:limit]]
+
     async def _gsc_query(self, start_day: date, end_day: date, dimensions: list[str]) -> list[dict]:
         if not self.gsc_site_url:
             raise GoogleReadError("connection has no GSC site_url")

@@ -54,6 +54,12 @@ class Task(SQLModel, BaseObject, table=True):
         return rows.scalars().first()
 
     @staticmethod
+    async def for_brand(brand_id: str, statuses: list[str], limit: int = 100) -> list["Task"]:
+        """Newest-first tasks in the given statuses — the Work surfaces."""
+        rows = await ReplicaDatabase.session.execute(select(Task).where(Task.brand_id == brand_id).where(Task.status.in_(statuses)).order_by(Task.created_at.desc()).limit(limit))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
     async def in_flight(brand_id: str, name: str) -> list["Task"]:
         """Queued or running tasks of one name — producers check this before
         chaining so the same work is never stacked twice."""

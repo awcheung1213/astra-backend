@@ -38,7 +38,7 @@ async def _create_task_per_active_brand(name: str, queue: str, payload: dict | N
 ##############################
 
 
-@app.periodic(cron="")  # Thursday 00:00 UTC
+@app.periodic(cron="0 0 * * 4")  # Thursday 00:00 UTC
 @app.task(name="schedule_submit_prompt_execution_batch", queue="schedules")
 async def schedule_submit_prompt_execution_batch() -> None:
     """#18 — collect the week's AI answers: one corpus-deduped batch per engine."""
@@ -46,7 +46,7 @@ async def schedule_submit_prompt_execution_batch() -> None:
     logger.info(f"[schedules] schedule_submit_prompt_execution_batch tick ts={datetime.now()}")
 
 
-@app.periodic(cron="")  # hourly
+@app.periodic(cron="0 * * * *")  # hourly
 @app.task(name="schedule_poll_batches", queue="schedules")
 async def schedule_poll_batches() -> None:
     """#18 — ingest finished provider batches (execution -> corpus, sentiment -> analysis).
@@ -64,7 +64,7 @@ async def schedule_poll_batches() -> None:
 ##############################
 
 
-@app.periodic(cron="")  # Sundays 00:00 UTC
+@app.periodic(cron="0 0 * * 0")  # Sundays 00:00 UTC
 @app.task(name="schedule_visibility_run", queue="schedules")
 async def schedule_visibility_run() -> None:
     """#17 — score the week's analyzed answers into one trend point per brand."""
@@ -72,7 +72,7 @@ async def schedule_visibility_run() -> None:
     logger.info(f"[schedules] schedule_visibility_run tick ts={datetime.now()}: {count} sweeps")
 
 
-@app.periodic(cron="")  # Sundays 01:00 UTC
+@app.periodic(cron="0 1 * * 0")  # Sundays 01:00 UTC
 @app.task(name="schedule_site_audits", queue="schedules")
 async def schedule_site_audits() -> None:
     """#3 (ongoing) — crawl + audit rule engine over every CONNECTED site -> typed findings."""
@@ -85,7 +85,7 @@ async def schedule_site_audits() -> None:
     logger.info(f"[schedules] schedule_site_audits tick ts={datetime.now()}: {len(sites)} audits")
 
 
-@app.periodic(cron="")  # Mondays 00:00 UTC — the source-poller sweep
+@app.periodic(cron="0 0 * * 1")  # Mondays 00:00 UTC — the source-poller sweep
 @app.task(name="schedule_metrics_ingestion", queue="schedules")
 async def schedule_metrics_ingestion() -> None:
     """#18 (dashboards) — orders/calls/form entries + the trailing week of daily
@@ -95,7 +95,7 @@ async def schedule_metrics_ingestion() -> None:
     logger.info(f"[schedules] schedule_metrics_ingestion tick ts={datetime.now()}: {count} ingestions")
 
 
-@app.periodic(cron="")  # Mondays 02:00 UTC — after the sweep's ingestion lands
+@app.periodic(cron="0 2 * * 1")  # Mondays 02:00 UTC — after the sweep's ingestion lands
 @app.task(name="schedule_alert_detection", queue="schedules")
 async def schedule_alert_detection() -> None:
     """#19 — thresholds & change-points over fresh metrics (index drops, CWV
@@ -105,7 +105,7 @@ async def schedule_alert_detection() -> None:
     logger.info(f"[schedules] schedule_alert_detection tick ts={datetime.now()}: {count} detections")
 
 
-@app.periodic(cron="")  # Mondays 06:00 UTC — the Pulse week-opener
+@app.periodic(cron="0 6 * * 1")  # Mondays 06:00 UTC — the Pulse week-opener
 @app.task(name="schedule_weekly_briefs", queue="schedules")
 async def schedule_weekly_briefs() -> None:
     """Pulse — the Account Manager's Brief: serif voice over assembler facts.
@@ -114,7 +114,7 @@ async def schedule_weekly_briefs() -> None:
     logger.info(f"[schedules] schedule_weekly_briefs tick ts={datetime.now()}: {count} briefs")
 
 
-@app.periodic(cron="")  # Tuesdays 09:00 UTC
+@app.periodic(cron="0 9 * * 2")  # Tuesdays 09:00 UTC
 @app.task(name="schedule_link_prospecting", queue="schedules")
 async def schedule_link_prospecting() -> None:
     """#13 — citation targets & PR placement prospecting; scout drafts, human sends.
@@ -123,7 +123,7 @@ async def schedule_link_prospecting() -> None:
     logger.info(f"[schedules] schedule_link_prospecting tick ts={datetime.now()}: {count} prospect scans")
 
 
-@app.periodic(cron="")  # Tuesdays 10:00 UTC
+@app.periodic(cron="0 10 * * 2")  # Tuesdays 10:00 UTC
 @app.task(name="schedule_community_scans", queue="schedules")
 async def schedule_community_scans() -> None:
     """#21 — community thread opportunities (Reddit/Quora); scout finds, human posts."""
@@ -131,7 +131,7 @@ async def schedule_community_scans() -> None:
     logger.info(f"[schedules] schedule_community_scans tick ts={datetime.now()}: {count} community scans")
 
 
-@app.periodic(cron="")  # Tuesdays 11:00 UTC
+@app.periodic(cron="0 11 * * 2")  # Tuesdays 11:00 UTC
 @app.task(name="schedule_unlinked_mention_scans", queue="schedules")
 async def schedule_unlinked_mention_scans() -> None:
     """#22 — unlinked mention reclamation; scout finds + drafts, human sends."""
@@ -139,7 +139,7 @@ async def schedule_unlinked_mention_scans() -> None:
     logger.info(f"[schedules] schedule_unlinked_mention_scans tick ts={datetime.now()}: {count} mention scans")
 
 
-@app.periodic(cron="")  # Wednesdays 10:00 UTC
+@app.periodic(cron="0 10 * * 3")  # Wednesdays 10:00 UTC
 @app.task(name="schedule_gbp_touches", queue="schedules")
 async def schedule_gbp_touches() -> None:
     """#14 — GBP posts / Q&A behind the Reputation tone gate.
@@ -148,7 +148,7 @@ async def schedule_gbp_touches() -> None:
     logger.info(f"[schedules] schedule_gbp_touches tick ts={datetime.now()}: {count} touches")
 
 
-@app.periodic(cron="")  # Wednesdays 11:00 UTC
+@app.periodic(cron="0 11 * * 3")  # Wednesdays 11:00 UTC
 @app.task(name="schedule_review_asks", queue="schedules")
 async def schedule_review_asks() -> None:
     """#15 — review generation campaign: the ASKS ride the notifier; the
@@ -163,7 +163,7 @@ async def schedule_review_asks() -> None:
 ##############################
 
 
-@app.periodic(cron="")  # daily 09:00 UTC
+@app.periodic(cron="0 9 * * *")  # daily 09:00 UTC
 @app.task(name="schedule_client_chases", queue="schedules")
 async def schedule_client_chases() -> None:
     """#1 (the chase half) + all stale client tasks — the AM's escalating
@@ -173,7 +173,7 @@ async def schedule_client_chases() -> None:
     logger.info(f"[schedules] schedule_client_chases tick ts={datetime.now()}: {count} chases")
 
 
-@app.periodic(cron="")  # daily 13:00 UTC — same-day deadlines
+@app.periodic(cron="0 13 * * *")  # daily 13:00 UTC — same-day deadlines
 @app.task(name="schedule_journalist_scans", queue="schedules")
 async def schedule_journalist_scans() -> None:
     """#20 — journalist/source request scan; scout flags + drafts, human sends.
@@ -188,7 +188,7 @@ async def schedule_journalist_scans() -> None:
 ##############################
 
 
-@app.periodic(cron="")  # 1st of the month 07:00 UTC — before the report tick
+@app.periodic(cron="0 7 1 * *")  # 1st of the month 07:00 UTC — before the report tick
 @app.task(name="schedule_content_calendars", queue="schedules")
 async def schedule_content_calendars() -> None:
     """#10 — the month's content calendar, drafted plan-aware; approved calendar
@@ -198,7 +198,7 @@ async def schedule_content_calendars() -> None:
     logger.info(f"[schedules] schedule_content_calendars tick ts={datetime.now()}: {count} calendars")
 
 
-@app.periodic(cron="")  # 1st of the month 08:00 UTC
+@app.periodic(cron="0 8 1 * *")  # 1st of the month 08:00 UTC
 @app.task(name="schedule_monthly_reports", queue="schedules")
 async def schedule_monthly_reports() -> None:
     """#16 — report assembler fills every number; AM prose is written over it.
@@ -207,7 +207,7 @@ async def schedule_monthly_reports() -> None:
     logger.info(f"[schedules] schedule_monthly_reports tick ts={datetime.now()}: {count} reports")
 
 
-@app.periodic(cron="")  # 1st of Jan/Apr/Jul/Oct 10:00 UTC
+@app.periodic(cron="0 10 1 1,4,7,10 *")  # 1st of Jan/Apr/Jul/Oct 10:00 UTC
 @app.task(name="schedule_quarterly_reviews", queue="schedules")
 async def schedule_quarterly_reviews() -> None:
     """#24 — the Strategist's cadence: diagnoses + goals -> roadmap workstreams.

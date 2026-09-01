@@ -47,8 +47,8 @@ class Brand(SQLModel, BaseObject, table=True):
 
     @staticmethod
     async def all() -> list["Brand"]:
-        brands = await ReplicaDatabase.session.exec(select(Brand))
-        return list(brands)
+        rows = await ReplicaDatabase.session.execute(select(Brand))
+        return list(rows.scalars().all())
 
     @staticmethod
     async def update(id: str, **fields) -> "Brand":

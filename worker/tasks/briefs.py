@@ -79,9 +79,10 @@ async def client_chase(task_id: str, brand_id: str) -> None:
         await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title=CHASE_TITLE, body=nudge_text, link_ref="tasks")
 
 
-# Client-contribution tasks (rows with no queue job, created by onboarding).
+# Client-contribution tasks (rows with no queue job): the first four are
+# created by onboarding's launch; collect_study_data by plan approval (#25).
 # The chase only ever nudges THESE names — internal work is never chased.
-CLIENT_TASK_NAMES = {"grant_access", "upload_photos", "answer_sme_interview", "verify_conversion_tracking"}
+CLIENT_TASK_NAMES = {"grant_access", "upload_photos", "answer_sme_interview", "verify_conversion_tracking", "collect_study_data"}
 CHASE_AFTER_DAYS = 3  # how long a client task may sit before the first nudge
 CHASE_COOLDOWN_DAYS = 3  # never nudge the same org more often than this
 CHASE_TITLE = "A gentle nudge from your Astra team"

@@ -1,6 +1,20 @@
 from schemas.base_schemas import BaseRequest, BaseResponse
 
 
+class SignupRequest(BaseRequest):
+    organization_name: str
+    brand_name: str
+    website_url: str
+    footprint: str | None = None  # local | national
+    goal_metric: str | None = None  # leads | revenue
+    goal_target: float | None = None
+
+
+class SignupResponse(BaseResponse):
+    organization_id: str
+    brand_id: str
+
+
 class LaunchResponse(BaseResponse):
     brand_id: str
     client_tasks: list[str]  # #1/#7 — rows the client must complete (chased daily)

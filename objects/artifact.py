@@ -69,6 +69,12 @@ class Artifact(SQLModel, BaseObject, table=True):
         return artifact
 
     @staticmethod
+    async def pending_for_brand(brand_id: str) -> list["Artifact"]:
+        """The approvals queue, oldest first — review in arrival order."""
+        rows = await ReplicaDatabase.session.execute(select(Artifact).where(Artifact.brand_id == brand_id).where(Artifact.status == STATUS_PENDING_REVIEW).order_by(Artifact.created_at))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
     async def latest(brand_id: str, type: str, statuses: list[str] | None = None) -> "Artifact | None":
         """Newest artifact of a type for a brand, optionally filtered to given
         statuses (e.g. only approved plans)."""

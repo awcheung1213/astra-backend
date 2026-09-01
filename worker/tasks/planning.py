@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from adapters.agents.claude_agent import ClaudeAgent
 from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, Artifact
 from objects.brand import Brand
+from objects.change_set import ChangeSet
 from objects.finding import Finding
 from objects.goal import Goal
 from objects.metric_point import MetricPoint
@@ -127,7 +128,8 @@ def _plan_prompt(brand: Brand, facts: dict) -> str:
         "Use ONLY the facts provided; where data is missing, plan from brand context and say so.\n\n"
         "Respond with ONLY a JSON object, no prose and no code fences:\n"
         '{"summary_markdown": "the plan narrative, for the owner",\n'
-        ' "workstreams": [{"name": "...", "why": "tied to a fact", "expected_impact": "...", "effort": "low|medium|high", "first_moves": ["..."]}],\n'
+        ' "workstreams": [{"name": "...", "why": "tied to a fact", "expected_impact": "...", "effort": "low|medium|high", "first_moves": ["..."],\n'
+        '                  "needs_client_data": true ONLY when the workstream depends on data only the client can collect (e.g. an original study)}],\n'
         ' "stop_doing": ["..."]}\n\n'
         f"Brand: {brand.name} ({brand.website_url})\n"
         f"Category: {brand.category}\n"
@@ -159,9 +161,12 @@ async def assemble_diagnosis_facts(brand: Brand, trigger: str, trigger_evidence:
     open_findings = await Finding.open_for_brand(brand.id)
     resolved_findings = await Finding.resolved_since(brand.id, since=today - timedelta(days=RECENT_WINDOW_DAYS))
 
-    # TODO(#23): add the change ledger (applied change sets, with dates) once
-    #       the change-set engine lands — "what did WE change right before the
-    #       drop" is the diagnosis's sharpest question and this is its proxy.
+    # "what did WE change right before the drop" is the diagnosis's sharpest question
+    changes_applied = [
+        {"applied_at": change_set.applied_at.isoformat(), "operations": [{"op": operation["op"], "field": operation.get("field"), "target": operation.get("target")} for operation in change_set.operations]}
+        for change_set in await ChangeSet.for_brand(brand.id)
+        if change_set.applied_at and change_set.applied_at > recent_cutoff
+    ]
     return {
         "trigger": {"kind": trigger, "evidence": trigger_evidence},
         "weekly_metrics": weekly_metrics,
@@ -170,6 +175,7 @@ async def assemble_diagnosis_facts(brand: Brand, trigger: str, trigger_evidence:
             "open_findings": [{"kind": finding.kind, "summary": finding.summary, "since": finding.created_at.isoformat() if finding.created_at else None} for finding in open_findings],
             "resolved_recently": [{"kind": finding.kind, "summary": finding.summary} for finding in resolved_findings],
         },
+        "changes_applied_recently": changes_applied,
         "work_shipped_recently": await completed_task_counts(brand.id, since=recent_cutoff),
     }
 

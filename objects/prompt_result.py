@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timedelta
 from exceptions.exceptions import PromptResultNotFound
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, func, select, text, update
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, case, func, select, text, update
 from sqlmodel import Field, SQLModel, delete
 from utils.database import Database, ReplicaDatabase
 
@@ -84,6 +84,14 @@ class PromptResult(SQLModel, BaseObject, table=True):
         await session.flush()
         await session.refresh(prompt_result)
         return prompt_result
+
+    @staticmethod
+    async def counts_for_run(visibility_run_id: str) -> dict:
+        """One run's answer totals: how many answers, how many mention the
+        brand — the 'you' side of the share-of-voice breakdown."""
+        rows = await ReplicaDatabase.session.execute(select(func.count(), func.sum(case((PromptResult.brand_mentioned, 1), else_=0))).where(PromptResult.visibility_run_id == visibility_run_id))  # type: ignore
+        total, mentioned = rows.one()
+        return {"total_answers": int(total or 0), "brand_mentions": int(mentioned or 0)}
 
     @staticmethod
     async def assign_visibility_run(ids: list[str], visibility_run_id: str) -> None:

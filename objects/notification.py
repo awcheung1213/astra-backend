@@ -1,12 +1,12 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
-from utils.database import Database
+from utils.database import Database, ReplicaDatabase
 
 KIND_WIN = "win"
 KIND_ALERT = "alert"
@@ -45,3 +45,9 @@ class Notification(SQLModel, BaseObject, table=True):
         await session.flush()
         await session.refresh(notification)
         return notification
+
+    @staticmethod
+    async def for_organization(organization_id: str, limit: int = 50) -> list["Notification"]:
+        """Newest-first — the Pulse feed."""
+        rows = await ReplicaDatabase.session.execute(select(Notification).where(Notification.organization_id == organization_id).order_by(Notification.created_at.desc()).limit(limit))  # type: ignore
+        return list(rows.scalars().all())

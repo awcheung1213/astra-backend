@@ -6,9 +6,13 @@ Both are single no-tool agent calls over the brand's confirmed context —
 generation, not judgment — so they use task-specific system prompts (static,
 so prompt caching applies) rather than one of the seven roles."""
 
+from datetime import date, timedelta
+
 from adapters.agents.claude_agent import ClaudeAgent
+from adapters.google_adapter import GoogleAdapter, GoogleReadError
 from objects.brand import Brand
 from objects.competitor import Competitor
+from objects.connection import Connection
 from objects.prompt import Prompt
 from utils.agent_json import parse_agent_json
 from utils.logger import logger
@@ -28,12 +32,11 @@ async def prompt_research(task_id: str, brand_id: str) -> None:
         brand = await Brand.get(brand_id)
         existing_prompts = await Prompt.by_brand(brand_id)
         existing_query_hashes = {query_hash(existing.text) for existing in existing_prompts}
+        real_queries = await _gsc_top_queries(brand)
 
-        # TODO(#4, keyword half): ground generation in real query data (GSC via
-        #       the Google adapter, or a 3rd-party keyword API) once one lands.
         agent_output = await ClaudeAgent().run_agent(
             system=PROMPT_RESEARCH_SYSTEM,
-            prompt=_research_prompt(brand, existing_prompts),
+            prompt=_research_prompt(brand, existing_prompts, real_queries),
             tools=[],
             handlers={},
             operation="prompt_research",
@@ -87,6 +90,24 @@ async def competitor_bootstrap(task_id: str, brand_id: str) -> None:
 
 TARGET_PROMPT_COUNT = 15
 MAX_COMPETITOR_COUNT = 12
+GSC_QUERY_WINDOW_DAYS = 28
+GSC_QUERY_LIMIT = 25  # top real queries riding the research prompt
+
+
+async def _gsc_top_queries(brand: Brand) -> list[dict]:
+    """#4's keyword half: the brand's real GSC queries ground generation in
+    actual demand. Best-effort — research works fine without GSC, so a
+    missing connection or a failed pull degrades to an empty list. Branded
+    queries are filtered mechanically: the generation rule is brandless."""
+    gsc_connection = next((connection for connection in await Connection.connected_for_brand(brand.id) if connection.provider == "gsc"), None)
+    if gsc_connection is None:
+        return []
+    try:
+        top_queries = await GoogleAdapter(gsc_connection).search_top_queries(date.today() - timedelta(days=GSC_QUERY_WINDOW_DAYS), date.today() - timedelta(days=2), limit=GSC_QUERY_LIMIT * 2)
+    except GoogleReadError as error:
+        logger.warning(f"[research] brand {brand.id}: GSC query pull failed ({error}) — generating without it")
+        return []
+    return [top_query for top_query in top_queries if brand.name.lower() not in top_query["query"].lower()][:GSC_QUERY_LIMIT]
 
 
 ##############################
@@ -112,16 +133,20 @@ Exclude retailers, marketplaces, aggregators, and directories — only direct co
 Respond with ONLY a JSON array of competitor names, no prose and no code fences: ["Name One", "Name Two"]"""
 
 
-def _research_prompt(brand: Brand, existing_prompts: list[Prompt]) -> str:
+def _research_prompt(brand: Brand, existing_prompts: list[Prompt], real_queries: list[dict]) -> str:
     existing_lines = "\n".join(f"- {existing.text}" for existing in existing_prompts) or "(none yet)"
+    demand_lines = "\n".join(f"- {top_query['query']} ({top_query['clicks']} clicks)" for top_query in real_queries) or "(no Search Console data yet — generate from the brand context alone)"
     return (
         f"Generate {TARGET_PROMPT_COUNT} consumer questions for the brand's category below.\n"
+        "Ground them in the REAL search demand listed — the questions behind those queries — but phrase them\n"
+        "the way someone asks an AI assistant, not a search box.\n"
         "Do NOT restate or trivially rephrase the existing prompts listed — only genuinely new angles.\n\n"
         f"Brand: {brand.name} ({brand.website_url})\n"
         f"Category: {brand.category}\n"
         f"Description: {brand.description}\n"
         f"Audience: {brand.audience}\n"
         f"Footprint: {brand.footprint}\n\n"
+        f"Real queries people used to find the brand (last {GSC_QUERY_WINDOW_DAYS} days):\n{demand_lines}\n\n"
         f"Existing prompts:\n{existing_lines}"
     )
 
