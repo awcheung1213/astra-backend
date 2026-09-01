@@ -3,8 +3,9 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Field, SQLModel
-from utils.database import ReplicaDatabase
+from utils.database import Database, ReplicaDatabase
 from exceptions.exceptions import MarketNotFound
 
 from objects.base_object import BaseObject
@@ -57,7 +58,7 @@ class Market(SQLModel, BaseObject, table=True):
         from objects.brand_market import BrandMarket
 
         if brand_footprint == "local":
-            rows = await ReplicaDatabase.session.execute(select(Market).join(BrandMarket, BrandMarket.market_id == Market.id).where(BrandMarket.brand_id == brand_id, Market.is_active == True))  # type: ignore # noqa: E712
+            rows = await ReplicaDatabase.session.execute(select(Market).join(BrandMarket, BrandMarket.market_id == Market.id).where(BrandMarket.brand_id == brand_id, Market.is_active == True, Market.collection_market_id.is_(None)))  # type: ignore # noqa: E712
         else:
             rows = await ReplicaDatabase.session.execute(select(Market).where(Market.brand_id.is_(None), Market.source == SOURCE_SYSTEM, Market.is_active == True, Market.collection_market_id.is_(None)))  # type: ignore # noqa: E712
         return list(rows.scalars().all())
@@ -66,3 +67,41 @@ class Market(SQLModel, BaseObject, table=True):
     async def all() -> list["Market"]:
         rows = await ReplicaDatabase.session.execute(select(Market))
         return list(rows.scalars().all())
+
+    @staticmethod
+    async def search(query: str, limit: int = 10) -> list["Market"]:
+        """City-prefix typeahead over the shared active rows — the wizard's
+        coverage step. Biggest cities first so 'pho' leads with Phoenix."""
+        if not query.strip():
+            return []
+        rows = await ReplicaDatabase.session.execute(
+            select(Market).where(Market.brand_id.is_(None), Market.is_active == True, Market.collection_market_id.is_(None), Market.city.ilike(f"{query.strip()}%")).order_by(Market.population.desc().nulls_last(), Market.city).limit(limit)  # type: ignore # noqa: E712
+        )
+        return list(rows.scalars().all())
+
+    @staticmethod
+    async def get_or_create_city(city: str, state: str) -> "Market":
+        """ONE row per physical city (the corpus dedup invariant), three
+        layers deep: case-insensitive lookup first (keeping the existing
+        row's canonical casing), the (city, state) unique constraint as the
+        backstop, and a savepoint so a concurrent-create race is caught and
+        re-fetched instead of poisoning the request's transaction."""
+        city, state = city.strip(), state.strip().upper()
+        existing = await Market._by_city_state(city, state)
+        if existing:
+            return existing
+        market = Market(city=city, state=state, source=SOURCE_LOCAL)
+        try:
+            async with Database.session.begin_nested():
+                Database.session.add(market)
+        except IntegrityError:
+            raced = await Market._by_city_state(city, state)
+            if raced is None:
+                raise
+            return raced
+        return market
+
+    @staticmethod
+    async def _by_city_state(city: str, state: str) -> "Market | None":
+        rows = await Database.session.execute(select(Market).where(func.lower(Market.city) == city.lower(), func.lower(Market.state) == state.lower()))
+        return rows.scalars().first()

@@ -20,8 +20,11 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, status
 
 from adapters.agents.claude_agent import ClaudeAgent
-from objects.brand import Brand
+from constants.constants import MAX_FOOTPRINT_CITIES, US_STATE_ABBREVS
+from objects.brand import FOOTPRINT_LOCAL, Brand
+from objects.brand_market import BrandMarket
 from objects.goal import Goal
+from objects.market import Market
 from objects.organization import Organization
 from objects.task import STATUS_DONE, Task
 from schemas.onboarding_schemas import InterviewRequest, InterviewResponse, LaunchRequest, LaunchResponse, SignupRequest, SignupResponse
@@ -60,15 +63,46 @@ async def signup(request: SignupRequest) -> SignupResponse:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="brand_name and website_url are required")
     if not website_url.startswith("http"):
         website_url = f"https://{website_url}"
+    # a local brand with no markets would silently collect nothing forever —
+    # validate the city list up front (parse errors 422 before any row lands)
+    city_pairs = _parse_cities(request.cities or []) if request.footprint == FOOTPRINT_LOCAL else []
 
     organization = await Organization.create(name=request.organization_name.strip() or brand_name)
     brand = Brand(organization_id=organization.id, name=brand_name, website_url=website_url, footprint=request.footprint)
     Database.session.add(brand)
     await Database.session.flush()
+    for city, state in city_pairs:
+        market = await Market.get_or_create_city(city, state)
+        await BrandMarket.subscribe(brand.id, market.id)
     if request.goal_metric and request.goal_target:
         Database.session.add(Goal(brand_id=brand.id, metric=request.goal_metric, target=request.goal_target))
         await Database.session.flush()
     return SignupResponse.create({"organization_id": organization.id, "brand_id": brand.id})
+
+
+def _parse_cities(cities: list[str]) -> list[tuple[str, str]]:
+    """'City, ST' strings -> deduped (city, state) pairs, loudly validated:
+    the wizard's typeahead makes these picked-not-typed in the common case,
+    so anything malformed here is worth stopping the signup over."""
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in cities:
+        if "," not in raw:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"'{raw}' must be 'City, ST'")
+        city_part, state_part = raw.rsplit(",", 1)
+        city, state = city_part.strip(), state_part.strip().upper()
+        if not city or state not in US_STATE_ABBREVS:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"'{raw}' must be 'City, ST' with a real state code")
+        key = (city.lower(), state)
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append((city, state))
+    if not pairs:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="footprint is local — pick at least one city")
+    if len(pairs) > MAX_FOOTPRINT_CITIES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"at most {MAX_FOOTPRINT_CITIES} cities")
+    return pairs
 
 
 @router.post("/brands/{brand_id}/launch", response_model=LaunchResponse)

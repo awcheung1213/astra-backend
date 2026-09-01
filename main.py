@@ -43,6 +43,7 @@ from api.approvals import router as approvals_router  # noqa: E402
 from api.ask import router as ask_router  # noqa: E402
 from api.brands import router as brands_router  # noqa: E402
 from api.competitors import router as competitors_router  # noqa: E402
+from api.markets import router as markets_router  # noqa: E402
 from api.onboarding import router as onboarding_router  # noqa: E402
 from api.prompts import router as prompts_router  # noqa: E402
 from api.reads import router as reads_router  # noqa: E402
@@ -52,6 +53,7 @@ app.include_router(approvals_router)
 app.include_router(ask_router)
 app.include_router(brands_router)
 app.include_router(competitors_router)
+app.include_router(markets_router)
 app.include_router(onboarding_router)
 app.include_router(prompts_router)
 app.include_router(reads_router)

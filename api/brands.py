@@ -36,16 +36,16 @@ async def update_brand(brand_id: str, request: BrandUpdateRequest) -> BrandRespo
     if fields:
         brand = await Brand.update(brand.id, **fields)
     return BrandResponse.create(
-            {
-                "id": brand.id,
-                "organization_id": brand.organization_id,
-                "name": brand.name,
-                "website_url": brand.website_url,
-                "platform": brand.platform,
-                "footprint": brand.footprint,
-                "description": brand.description,
-                "category": brand.category,
-                "audience": brand.audience,
-                "differentiators": brand.differentiators,
-            }
-        )
+        {
+            "id": brand.id,
+            "organization_id": brand.organization_id,
+            "name": brand.name,
+            "website_url": brand.website_url,
+            "platform": brand.platform,
+            "footprint": brand.footprint,
+            "description": brand.description,
+            "category": brand.category,
+            "audience": brand.audience,
+            "differentiators": brand.differentiators,
+        }
+    )

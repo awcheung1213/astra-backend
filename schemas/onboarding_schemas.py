@@ -6,6 +6,7 @@ class SignupRequest(BaseRequest):
     brand_name: str
     website_url: str
     footprint: str | None = None  # local | national
+    cities: list[str] | None = None  # "City, ST" strings; required when footprint is local
     goal_metric: str | None = None  # leads | revenue
     goal_target: float | None = None
 
