@@ -7,7 +7,7 @@ from sqlmodel import Field, SQLModel
 
 from exceptions.exceptions import SiteNotFound
 from objects.base_object import BaseObject
-from utils.database import ReplicaDatabase
+from utils.database import Database, ReplicaDatabase
 
 STATUS_PENDING = "pending"
 STATUS_CONNECTED = "connected"
@@ -47,3 +47,26 @@ class Site(SQLModel, BaseObject, table=True):
     async def by_brand(brand_id: str) -> "Site | None":
         rows = await ReplicaDatabase.session.execute(select(Site).where(Site.brand_id == brand_id).where(Site.status == STATUS_CONNECTED))
         return rows.scalars().first()
+
+    @staticmethod
+    async def any_for_brand(brand_id: str) -> "Site | None":
+        """The brand's site row in ANY status — the connect flow's upsert
+        target and the status card's source (by_brand deliberately serves
+        only connected rows, so pending/error/disconnected stay inert)."""
+        rows = await ReplicaDatabase.session.execute(select(Site).where(Site.brand_id == brand_id).order_by(Site.created_at))  # type: ignore
+        return rows.scalars().first()
+
+    @staticmethod
+    async def upsert_for_brand(brand_id: str, platform: str, status: str, credentials_encrypted: str | None) -> "Site":
+        """One site row per brand, updated in place (the schema allows many;
+        the connect flow enforces one)."""
+        site = await Site.any_for_brand(brand_id) or Site(brand_id=brand_id, platform=platform)
+        site.platform = platform
+        site.status = status
+        site.credentials_encrypted = credentials_encrypted
+        if status == STATUS_CONNECTED:
+            site.connected_at = datetime.now()
+            site.last_verified_at = datetime.now()
+        Database.session.add(site)
+        await Database.session.flush()
+        return site

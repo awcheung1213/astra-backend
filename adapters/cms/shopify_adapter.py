@@ -30,6 +30,12 @@ class ShopifyAdapter:
         self.base_url = f"https://{credentials['shop_domain']}/admin/api/{API_VERSION}"
         self.headers = {"X-Shopify-Access-Token": credentials["access_token"]}
 
+    async def verify(self) -> None:
+        """Cheap authed read proving shop_domain + token actually work.
+        Raises CmsWriteError on any failure."""
+        async with httpx.AsyncClient(headers=self.headers, timeout=WRITE_TIMEOUT_SECONDS) as client:
+            await self._request(client, "GET", "/shop.json")
+
     async def apply(self, operation: dict) -> dict:
         async with httpx.AsyncClient(headers=self.headers, timeout=WRITE_TIMEOUT_SECONDS) as client:
             if operation["op"] == "publish_page":

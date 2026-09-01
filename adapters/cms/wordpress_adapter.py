@@ -31,6 +31,13 @@ class WordPressAdapter:
         self.base_url = credentials["base_url"].rstrip("/")
         self.auth = (credentials["username"], credentials["app_password"])
 
+    async def verify(self) -> None:
+        """Cheap authed read proving base_url + credentials actually work.
+        context=edit forces authentication — a public read would pass with a
+        wrong password. Raises CmsWriteError on any failure."""
+        async with httpx.AsyncClient(auth=self.auth, timeout=WRITE_TIMEOUT_SECONDS, follow_redirects=True) as client:
+            await self._request(client, "GET", "/wp-json/wp/v2/pages?per_page=1&context=edit")
+
     async def apply(self, operation: dict) -> dict:
         async with httpx.AsyncClient(auth=self.auth, timeout=WRITE_TIMEOUT_SECONDS, follow_redirects=True) as client:
             if operation["op"] == "publish_page":

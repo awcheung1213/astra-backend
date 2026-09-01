@@ -13,7 +13,8 @@ What this sets up, step by step:
      Without a BEA key/coverage, ranking degrades to population alone.
   2. a test organization
   3. one brand under it (Sunrise Dental)
-  4. a connected site row (so audit-style tasks have a target)
+  4. a PENDING site row (connect a real WP/Shopify sandbox via
+     POST /brands/{id}/site to exercise audits + change application)
   5. two DONE visibility runs (last week + this week) -> the Brief gets a
      real score and a week-over-week delta
   6. two open findings (one fresh, one old) -> the Brief's site-health section
@@ -35,7 +36,7 @@ from objects.brand import Brand
 from objects.finding import SEVERITY_SERIOUS, SEVERITY_WARN, Finding
 from objects.market import SOURCE_SYSTEM, Market
 from objects.organization import Organization
-from objects.site import STATUS_CONNECTED, Site
+from objects.site import Site
 from objects.task import STATUS_DONE, STATUS_QUEUED, Task
 from objects.visibility_run import STATUS_DONE as RUN_DONE
 from objects.visibility_run import VisibilityRun
@@ -191,11 +192,15 @@ async def seed_test_brand_with_history(session) -> None:
     await session.flush()
     print(f"3.  brand: {dental_brand.name} ({dental_brand.id})")
 
-    # ---- step 4: a connected site -------------------------------------
-    connected_site = Site(brand_id=dental_brand.id, platform="wordpress", status=STATUS_CONNECTED, connected_at=datetime.now())
-    session.add(connected_site)
+    # ---- step 4: a pending site ---------------------------------------
+    # pending, NOT connected: a "connected" row with NULL credentials would
+    # dead-letter change_set_apply on a raw InvalidToken the first time an
+    # approved draft dispatches. Connect a real WP/Shopify sandbox through
+    # POST /brands/{id}/site to exercise the apply path.
+    pending_site = Site(brand_id=dental_brand.id, platform="wordpress")
+    session.add(pending_site)
     await session.flush()
-    print(f"4.  connected site: {connected_site.platform} ({connected_site.id})")
+    print(f"4.  pending site: {pending_site.platform} ({pending_site.id}) — connect a real one via POST /brands/{{id}}/site")
 
     # ---- step 5: two DONE visibility runs (the Brief's trend) ---------
     last_week_run = VisibilityRun(brand_id=dental_brand.id, week_of=LAST_MONDAY, status=RUN_DONE, overall_score=LAST_WEEK_OVERALL_SCORE, detection_rate=0.40, share_of_voice=0.22, positive_rate=0.30, top3_rate=0.25, citation_rate=0.10)
@@ -206,8 +211,8 @@ async def seed_test_brand_with_history(session) -> None:
     print(f"5.  visibility runs: {LAST_WEEK_OVERALL_SCORE} (last week) -> {THIS_WEEK_OVERALL_SCORE} (this week)")
 
     # ---- step 6: open findings (the Brief's site-health section) ------
-    fresh_finding = Finding(brand_id=dental_brand.id, site_id=connected_site.id, kind="missing_schema", severity=SEVERITY_WARN, summary="Page has no structured data (ld+json): /services")
-    old_finding = Finding(brand_id=dental_brand.id, site_id=connected_site.id, kind="blocked_ai_crawler", severity=SEVERITY_SERIOUS, summary="robots.txt blocks GPTBot — invisible to that AI engine", created_at=datetime.now() - timedelta(days=20))
+    fresh_finding = Finding(brand_id=dental_brand.id, site_id=pending_site.id, kind="missing_schema", severity=SEVERITY_WARN, summary="Page has no structured data (ld+json): /services")
+    old_finding = Finding(brand_id=dental_brand.id, site_id=pending_site.id, kind="blocked_ai_crawler", severity=SEVERITY_SERIOUS, summary="robots.txt blocks GPTBot — invisible to that AI engine", created_at=datetime.now() - timedelta(days=20))
     session.add(fresh_finding)
     session.add(old_finding)
     await session.flush()

@@ -28,3 +28,9 @@ class Connection(SQLModel, BaseObject, table=True):
     async def connected_for_brand(brand_id: str) -> list["Connection"]:
         rows = await ReplicaDatabase.session.execute(select(Connection).where(Connection.brand_id == brand_id).where(Connection.status == STATUS_CONNECTED))
         return list(rows.scalars().all())
+
+    @staticmethod
+    async def for_brand(brand_id: str) -> list["Connection"]:
+        """Every provider row in ANY status — the Connect status card."""
+        rows = await ReplicaDatabase.session.execute(select(Connection).where(Connection.brand_id == brand_id).order_by(Connection.created_at))
+        return list(rows.scalars().all())
