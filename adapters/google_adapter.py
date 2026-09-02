@@ -25,8 +25,11 @@ from objects.connection import Connection
 from utils.token_crypto import decrypt_credentials
 
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 GSC_API_BASE = "https://searchconsole.googleapis.com/webmasters/v3"
 GA4_API_BASE = "https://analyticsdata.googleapis.com/v1beta"
+GA4_ADMIN_API_BASE = "https://analyticsadmin.googleapis.com/v1beta"
 READ_TIMEOUT_SECONDS = 30.0
 GSC_ROW_LIMIT = 25000  # per-page daily rows for a week fit comfortably
 
@@ -49,6 +52,65 @@ async def fetch_google_access_token(client: httpx.AsyncClient, refresh_token: st
     if response.status_code >= 400:
         raise GoogleReadError(f"google token refresh -> {response.status_code}: {response.text[:200]}")
     return response.json()["access_token"]
+
+
+async def fetch_google_access_token_standalone(refresh_token: str) -> str:
+    """fetch_google_access_token with its own client — for callers outside an
+    adapter instance (the connect flow's property listings)."""
+    async with httpx.AsyncClient(timeout=READ_TIMEOUT_SECONDS) as client:
+        return await fetch_google_access_token(client, refresh_token)
+
+
+async def exchange_google_code(code: str) -> dict:
+    """Authorization code -> token payload (access_token + refresh_token) —
+    the consent callback's half of the OAuth dance."""
+    if not settings.GOOGLE_OAUTH_CLIENT_ID:
+        raise GoogleReadError("GOOGLE_OAUTH_CLIENT_ID/SECRET not configured")
+    async with httpx.AsyncClient(timeout=READ_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.post(GOOGLE_TOKEN_URL, data={"client_id": settings.GOOGLE_OAUTH_CLIENT_ID, "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET, "code": code, "grant_type": "authorization_code", "redirect_uri": settings.GOOGLE_OAUTH_REDIRECT_URL})
+        except httpx.HTTPError as error:
+            raise GoogleReadError(f"google code exchange failed: {error}") from error
+    if response.status_code >= 400:
+        raise GoogleReadError(f"google code exchange -> {response.status_code}: {response.text[:200]}")
+    return response.json()
+
+
+async def list_gsc_properties(access_token: str) -> list[str]:
+    """The GSC properties the consented account can read (unverified ones
+    excluded — queries against them 403)."""
+    async with httpx.AsyncClient(timeout=READ_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.get(f"{GSC_API_BASE}/sites", headers={"Authorization": f"Bearer {access_token}"})
+        except httpx.HTTPError as error:
+            raise GoogleReadError(f"gsc site listing failed: {error}") from error
+    if response.status_code >= 400:
+        raise GoogleReadError(f"gsc site listing -> {response.status_code}: {response.text[:200]}")
+    return [entry["siteUrl"] for entry in response.json().get("siteEntry", []) if entry.get("permissionLevel") != "siteUnverifiedUser"]
+
+
+async def list_ga4_properties(access_token: str) -> list[dict]:
+    """The GA4 properties the consented account can read:
+    [{property_id, display_name}] — no auto-match is possible, the client picks."""
+    async with httpx.AsyncClient(timeout=READ_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.get(f"{GA4_ADMIN_API_BASE}/accountSummaries", params={"pageSize": 200}, headers={"Authorization": f"Bearer {access_token}"})
+        except httpx.HTTPError as error:
+            raise GoogleReadError(f"ga4 property listing failed: {error}") from error
+    if response.status_code >= 400:
+        raise GoogleReadError(f"ga4 property listing -> {response.status_code}: {response.text[:200]}")
+    properties = []
+    for account in response.json().get("accountSummaries", []):
+        for summary in account.get("propertySummaries", []):
+            properties.append({"property_id": summary.get("property", "").removeprefix("properties/"), "display_name": summary.get("displayName", "")})
+    return properties
+
+
+async def revoke_google_token(refresh_token: str) -> None:
+    """Best-effort revoke at Google on disconnect — failures are the
+    caller's to log, never to surface (the row is deleted regardless)."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        await client.post(GOOGLE_REVOKE_URL, params={"token": refresh_token})
 
 
 class GoogleAdapter:

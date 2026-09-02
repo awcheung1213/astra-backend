@@ -1,19 +1,22 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, UniqueConstraint, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
 from objects.site import STATUS_CONNECTED, STATUS_PENDING
-from utils.database import ReplicaDatabase
+from utils.database import Database, ReplicaDatabase
 
 
 class Connection(SQLModel, BaseObject, table=True):
     """Read-side integrations — deliberately separate from sites."""
 
     __tablename__ = "connections"
+    # one row per provider per brand: the consumers (research, metrics, gbp)
+    # all do first-match-wins lookups, so a duplicate would be a silent coin flip
+    __table_args__ = (UniqueConstraint("brand_id", "provider"),)
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     brand_id: str = Field(sa_column=Column(String, ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True))
@@ -32,5 +35,30 @@ class Connection(SQLModel, BaseObject, table=True):
     @staticmethod
     async def for_brand(brand_id: str) -> list["Connection"]:
         """Every provider row in ANY status — the Connect status card."""
-        rows = await ReplicaDatabase.session.execute(select(Connection).where(Connection.brand_id == brand_id).order_by(Connection.created_at))
+        rows = await ReplicaDatabase.session.execute(select(Connection).where(Connection.brand_id == brand_id).order_by(Connection.created_at))  # type: ignore
         return list(rows.scalars().all())
+
+    @staticmethod
+    async def get_for_brand_provider(brand_id: str, provider: str) -> "Connection | None":
+        rows = await ReplicaDatabase.session.execute(select(Connection).where(Connection.brand_id == brand_id).where(Connection.provider == provider))  # type: ignore
+        return rows.scalars().first()
+
+    @staticmethod
+    async def upsert(brand_id: str, provider: str, status: str, credentials_encrypted: str | None) -> "Connection":
+        """One row per (brand, provider), updated in place — backed by the
+        unique constraint."""
+        connection = await Connection.get_for_brand_provider(brand_id, provider) or Connection(brand_id=brand_id, provider=provider)
+        connection.status = status
+        connection.credentials_encrypted = credentials_encrypted
+        if status == STATUS_CONNECTED:
+            connection.connected_at = datetime.now()
+        Database.session.add(connection)
+        await Database.session.flush()
+        return connection
+
+    @staticmethod
+    async def delete_for_brand_provider(brand_id: str, provider: str) -> None:
+        connection = await Connection.get_for_brand_provider(brand_id, provider)
+        if connection is not None:
+            await Database.session.delete(connection)
+            await Database.session.flush()

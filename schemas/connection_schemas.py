@@ -9,6 +9,12 @@ class SiteConnectRequest(BaseRequest):
     credentials: dict
 
 
+class PickPropertyRequest(BaseRequest):
+    # gsc: a siteUrl ("sc-domain:example.com" / "https://example.com/");
+    # ga4: a numeric property id
+    property: str
+
+
 class SiteStatusResponse(BaseResponse):
     platform: str
     status: str  # pending | connected | error | disconnected

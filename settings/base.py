@@ -30,6 +30,11 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # Google read adapter (GSC + GA4) OAuth app — empty = adapter unusable at call time
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+# where Google's consent redirect lands (must be registered on the OAuth app)
+# and where the callback bounces the browser afterwards — local defaults;
+# deployed environments override both via env
+GOOGLE_OAUTH_REDIRECT_URL = os.environ.get("GOOGLE_OAUTH_REDIRECT_URL", "http://localhost:8000/api/v1/connections/google/callback")
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://localhost:5173")
 
 
 TEST_URL = ""

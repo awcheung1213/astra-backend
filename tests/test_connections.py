@@ -17,7 +17,7 @@ from utils.database import Database, ReplicaDatabase
 from utils.token_crypto import decrypt_credentials
 
 WP_CREDENTIALS = {"base_url": "sunrisedental.example", "username": "astra", "app_password": "abcd efgh"}
-SHOPIFY_CREDENTIALS = {"shop_domain": "https://sunrise.myshopify.com/", "access_token": "shpat_test"}
+SHOPIFY_CREDENTIALS = {"shop_domain": "https://sunrise.myshopify.com/", "client_id": "test-client-id", "client_secret": "test-client-secret"}
 
 
 def _stub_verify(monkeypatch, adapter_class, error: str | None = None):
