@@ -27,6 +27,9 @@ class Brand(SQLModel, BaseObject, table=True):
     website_url: str
     platform: str = Field(default=PLATFORM_UNKNOWN, sa_column=Column(String, server_default=PLATFORM_UNKNOWN, nullable=False))
     footprint: str | None = Field(default=None, sa_column=Column(String, nullable=True))  # local | national — set in onboarding step 3
+    # review_everything | balanced | hands_off — DISPLAY truth only; the
+    # approval_settings rows the preset macro writes are the enforcement truth
+    approval_preset: str | None = Field(default=None, sa_column=Column(String, nullable=True))
 
     # extraction-filled, client-confirmed (verbatim reserve lives in interview_raw)
     description: str | None = Field(default=None, sa_column=Column(Text, nullable=True))

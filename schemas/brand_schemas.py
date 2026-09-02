@@ -31,3 +31,14 @@ class BrandResponse(BaseResponse):
     category: str | None
     audience: str | None
     differentiators: list[str]
+    approval_preset: str | None
+
+
+class ApprovalPresetRequest(BaseRequest):
+    approval_preset: str  # review_everything | balanced | hands_off
+
+
+class ApprovalPresetResponse(BaseResponse):
+    brand_id: str
+    approval_preset: str
+    auto_approved_tasks: list[str]  # the task names the macro set to auto

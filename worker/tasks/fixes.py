@@ -16,10 +16,11 @@ import re
 import httpx
 
 from adapters.agents.claude_agent import ClaudeAgent
-from objects.artifact import Artifact
+from objects.artifact import STATUS_AUTO_APPROVED, Artifact
 from objects.brand import FOOTPRINT_LOCAL, Brand
 from objects.finding import STATUS_OPEN, Finding
 from utils.agent_prompts import ROLE_TECHNICAL
+from utils.approval_flow import fan_out_approval, initial_artifact_status
 from utils.database import ReplicaDatabase
 from utils.logger import logger
 from utils.task_queue import create_task, task_lifecycle
@@ -50,14 +51,22 @@ async def technical_fix(task_id: str, brand_id: str) -> None:
             logger.info(f"[fixes] finding {finding.id} ({finding.kind}): escalated to technical_judgment")
             return
 
-        await Artifact.create(
+        # born auto_approved under Balanced/Hands-off — then it dispatches its
+        # change set right here, through the same fan-out a human click uses
+        artifact_status = await initial_artifact_status(brand.id, "technical_fix", "change_proposal")
+        artifact = await Artifact.create(
             task_id=task_id,
             brand_id=brand.id,
             type="change_proposal",
             content={"finding_id": finding.id, "kind": finding.kind, "operations": [{"field": fix["field"], "url": page_url, "value": fix["value"]}]},
             evidence={"finding_summary": finding.summary, "derived_from": fix["derived_from"]},
+            status=artifact_status,
         )
-        logger.info(f"[fixes] finding {finding.id} ({finding.kind}): change_proposal ready for review")
+        if artifact_status == STATUS_AUTO_APPROVED:
+            await fan_out_approval(artifact)
+            logger.info(f"[fixes] finding {finding.id} ({finding.kind}): change_proposal auto-approved by preset — dispatched")
+        else:
+            logger.info(f"[fixes] finding {finding.id} ({finding.kind}): change_proposal ready for review")
 
 
 @app.task(name="technical_judgment", queue="fixes", retry=2)
@@ -86,12 +95,16 @@ async def technical_judgment(task_id: str, brand_id: str) -> None:
             brand_id=brand.id,
             task_id=task_id,
         )
+        # prose proposals stay human-reviewed under every shipped preset (no
+        # macro writes a technical_judgment row); the helper keeps the birth
+        # path uniform should a custom row ever exist
         await Artifact.create(
             task_id=task_id,
             brand_id=brand.id,
             type="change_proposal",
             content={"finding_id": finding.id, "kind": finding.kind, "url": page_url, "markdown": proposal_markdown},
             evidence={"finding_summary": finding.summary, "detail": finding.detail},
+            status=await initial_artifact_status(brand.id, "technical_judgment", "change_proposal"),
         )
 
 

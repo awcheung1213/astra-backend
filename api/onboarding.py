@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from adapters.agents.claude_agent import ClaudeAgent
 from constants.constants import MAX_FOOTPRINT_CITIES, US_STATE_ABBREVS
+from objects.approval_setting import PRESET_AUTO_TASKS, ApprovalSetting
 from objects.brand import FOOTPRINT_LOCAL, Brand
 from objects.brand_market import BrandMarket
 from objects.goal import Goal
@@ -107,17 +108,23 @@ def _parse_cities(cities: list[str]) -> list[tuple[str, str]]:
 
 @router.post("/brands/{brand_id}/launch", response_model=LaunchResponse)
 async def launch(brand_id: str, request: LaunchRequest | None = None) -> LaunchResponse:
-    """Once per brand: record the goal (chosen after signup), create the
-    client-contribution rows (#1/#7 — no queue job, the daily chase nags
-    them), and enqueue launch's own kickoff work (#3/#8 — the research pair
-    is the interview's, never launch's). 409 on a second launch."""
+    """Once per brand: record the goal and the approval preset (both chosen
+    after signup), create the client-contribution rows (#1/#7 — no queue job,
+    the daily chase nags them), and enqueue launch's own kickoff work (#3/#8 —
+    the research pair is the interview's, never launch's). 409 on a second
+    launch."""
     brand = await Brand.get(brand_id)
     if brand.onboarded_at is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="brand already launched")
+    approval_preset = request.approval_preset if request else None
+    if approval_preset is not None and approval_preset not in PRESET_AUTO_TASKS:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"approval_preset must be one of {sorted(PRESET_AUTO_TASKS)}")
 
     if request and request.goal_metric and request.goal_target:
         Database.session.add(Goal(brand_id=brand.id, metric=request.goal_metric, target=request.goal_target))
         await Database.session.flush()
+    if approval_preset is not None:
+        await ApprovalSetting.apply_preset(brand.id, approval_preset)
 
     # bare rows, deliberately NOT create_task: these are completed by the
     # CLIENT, never a worker — a queue job would dead-letter (no runner by
@@ -144,7 +151,7 @@ async def launch(brand_id: str, request: LaunchRequest | None = None) -> LaunchR
     # TODO(#7, config half): GA4 events + call-tracking config needs the Google
     #       adapter; until then only the client verification task row exists.
 
-    await Brand.update(brand.id, onboarded_at=datetime.now())
+    await Brand.update(brand.id, onboarded_at=datetime.now(), approval_preset=approval_preset or brand.approval_preset)
     return LaunchResponse.create({"brand_id": brand.id, "client_tasks": client_tasks_created, "queued_work": [work_name for work_name, _ in LAUNCH_WORK]})
 
 

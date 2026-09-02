@@ -18,6 +18,7 @@ from objects.prompt_result import PromptResult
 from objects.visibility_run import VisibilityRun
 from utils.agent_json import parse_agent_json
 from utils.agent_prompts import ROLE_CONTENT
+from utils.approval_flow import fan_out_approval, initial_artifact_status
 from utils.logger import logger
 from utils.task_queue import task_lifecycle
 from worker.app import app
@@ -45,8 +46,15 @@ async def content_calendar(task_id: str, brand_id: str) -> None:
         )
         entries = _parse_calendar_entries(agent_output)
 
-        calendar = await Artifact.create(task_id=task_id, brand_id=brand.id, type="calendar", content={"entries": entries}, evidence=facts)
-        await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title="Next month's content calendar is ready for review", link_ref=f"artifacts/{calendar.id}")
+        artifact_status = await initial_artifact_status(brand.id, "content_calendar", "calendar")
+        calendar = await Artifact.create(task_id=task_id, brand_id=brand.id, type="calendar", content={"entries": entries}, evidence=facts, status=artifact_status)
+        if artifact_status == STATUS_AUTO_APPROVED:
+            # Hands-off: every entry fans out its draft at birth — the human
+            # reads the calendar in the weekly digest, not an approval queue
+            await fan_out_approval(calendar)
+            await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title="Next month's content calendar is set — drafts are being written", link_ref=f"artifacts/{calendar.id}")
+        else:
+            await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title="Next month's content calendar is ready for review", link_ref=f"artifacts/{calendar.id}")
 
 
 @app.task(name="content_draft", queue="content", retry=2)
@@ -78,8 +86,13 @@ async def content_draft(task_id: str, brand_id: str) -> None:
         if not isinstance(draft, dict) or not all(draft.get(field) for field in ("title", "meta_description", "body_markdown")):
             raise ValueError(f"draft output is missing draft fields: {agent_output[:200]}")
 
-        await Artifact.create(task_id=task_id, brand_id=brand.id, type="draft", content={"kind": "new", **draft}, evidence={"calendar_entry": calendar_entry})
-        logger.info(f"[content] brand {brand.id}: draft ready for review — {draft['title']}")
+        artifact_status = await initial_artifact_status(brand.id, "content_draft", "draft")
+        artifact = await Artifact.create(task_id=task_id, brand_id=brand.id, type="draft", content={"kind": "new", **draft}, evidence={"calendar_entry": calendar_entry}, status=artifact_status)
+        if artifact_status == STATUS_AUTO_APPROVED:
+            await fan_out_approval(artifact)
+            logger.info(f"[content] brand {brand.id}: draft auto-approved by preset — dispatched — {draft['title']}")
+        else:
+            logger.info(f"[content] brand {brand.id}: draft ready for review — {draft['title']}")
 
 
 @app.task(name="content_refresh", queue="content", retry=2)
@@ -115,7 +128,13 @@ async def content_refresh(task_id: str, brand_id: str) -> None:
         if not isinstance(draft, dict) or not all(draft.get(field) for field in ("title", "meta_description", "body_markdown", "change_summary")):
             raise ValueError(f"refresh output is missing draft fields: {agent_output[:200]}")
 
-        await Artifact.create(task_id=task_id, brand_id=brand.id, type="draft", content={"kind": "refresh", "page": page_url, **draft}, evidence={"decay": decay_evidence})
+        # refreshes overwrite a live page wholesale — no shipped preset autos
+        # them (the macro lists content_draft, not content_refresh); the
+        # helper keeps the birth path uniform for a future custom row
+        artifact_status = await initial_artifact_status(brand.id, "content_refresh", "draft")
+        artifact = await Artifact.create(task_id=task_id, brand_id=brand.id, type="draft", content={"kind": "refresh", "page": page_url, **draft}, evidence={"decay": decay_evidence}, status=artifact_status)
+        if artifact_status == STATUS_AUTO_APPROVED:
+            await fan_out_approval(artifact)
         logger.info(f"[content] brand {brand.id}: refresh drafted for {page_url}")
 
 

@@ -8,8 +8,9 @@ NO AUTH YET (repo-wide) — same posture as the other routers."""
 
 from fastapi import APIRouter, HTTPException, status
 
+from objects.approval_setting import PRESET_AUTO_TASKS, ApprovalSetting
 from objects.brand import Brand
-from schemas.brand_schemas import BrandResponse, BrandUpdateRequest
+from schemas.brand_schemas import ApprovalPresetRequest, ApprovalPresetResponse, BrandResponse, BrandUpdateRequest
 
 router = APIRouter(prefix="/api/v1")
 
@@ -47,5 +48,21 @@ async def update_brand(brand_id: str, request: BrandUpdateRequest) -> BrandRespo
             "category": brand.category,
             "audience": brand.audience,
             "differentiators": brand.differentiators,
+            "approval_preset": brand.approval_preset,
         }
     )
+
+
+@router.put("/brands/{brand_id}/approval_preset", response_model=ApprovalPresetResponse)
+async def set_approval_preset(brand_id: str, request: ApprovalPresetRequest) -> ApprovalPresetResponse:
+    """Change how much ships without review ("relax it after the first
+    month"). PUT semantics on purpose: the preset macro REPLACES the brand's
+    approval_settings rows wholesale, so the call is idempotent. The
+    always-approve floor is code (utils/approval_flow.py) — no preset ever
+    auto-ships outward work."""
+    brand = await Brand.get(brand_id)
+    if request.approval_preset not in PRESET_AUTO_TASKS:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"approval_preset must be one of {sorted(PRESET_AUTO_TASKS)}")
+    auto_tasks = await ApprovalSetting.apply_preset(brand.id, request.approval_preset)
+    await Brand.update(brand.id, approval_preset=request.approval_preset)
+    return ApprovalPresetResponse.create({"brand_id": brand.id, "approval_preset": request.approval_preset, "auto_approved_tasks": auto_tasks})

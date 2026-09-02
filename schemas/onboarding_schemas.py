@@ -22,6 +22,7 @@ class LaunchRequest(BaseRequest):
 
     goal_metric: str | None = None  # leads | revenue
     goal_target: float | None = None
+    approval_preset: str | None = None  # review_everything | balanced | hands_off
 
 
 class LaunchResponse(BaseResponse):
