@@ -4,8 +4,10 @@ encrypted and stored. Nothing is stored on a failed verify. A successful
 connect closes the grant_access client task (the chase stops nagging) and
 fires the site audit README promises "at site connect".
 
-⚠ NO AUTH YET (repo-wide) — these routes accept secrets, so the auth port
-must land before this deploys anywhere public. Local dev only until then."""
+Auth rides the router-level guard (utils/authz.py) — these routes accept
+secrets, which is why the guard had to land before any public deploy. The
+Google callback lives on public_router: Google's browser redirect carries no
+bearer token, so its HMAC-signed state IS the auth."""
 
 import base64
 import hashlib
@@ -34,6 +36,9 @@ from utils.token_crypto import decrypt_credentials, encrypt_credentials
 from worker.tasks.changes import ADAPTER_BY_PLATFORM
 
 router = APIRouter(prefix="/api/v1")
+# registered WITHOUT the auth guard (main.py): Google's browser redirect
+# carries no bearer token — the HMAC-signed state IS the auth
+public_router = APIRouter(prefix="/api/v1")
 
 REQUIRED_CREDENTIAL_KEYS = {
     PLATFORM_WORDPRESS: ("base_url", "username", "app_password"),
@@ -190,7 +195,7 @@ async def google_authorize(brand_id: str, provider: str) -> dict:
     return {"url": f"{google_adapter.GOOGLE_AUTH_URL}?{urlencode(params, quote_via=quote)}"}
 
 
-@router.get("/connections/google/callback")
+@public_router.get("/connections/google/callback")
 async def google_callback(state: str = "", code: str = "", error: str = "") -> RedirectResponse:
     """Google's browser redirect — the signed state is the auth. Exchanges
     the code; GSC auto-connects when exactly one property matches the brand's

@@ -11,13 +11,14 @@ time normally, or later from Tasks if it was skipped, which the daily chase
 nags for), and launch owns plan_update + site_audit + the client-task rows,
 single-shot behind its 409.
 
-NO AUTH YET (repo-wide) — port utils/token_verifier.py + utils/authz.py from
-geoviz-backend before these endpoints face the internet."""
+Auth rides the router-level guard (utils/authz.py): signup requires only a
+valid token (the caller has no org yet — signup is what claims one, exactly
+once per user); interview/launch are brand-guarded by path."""
 
 import json
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
 from adapters.agents.claude_agent import ClaudeAgent
 from constants.constants import MAX_FOOTPRINT_CITIES, US_STATE_ABBREVS
@@ -28,8 +29,10 @@ from objects.goal import Goal
 from objects.market import Market
 from objects.organization import Organization
 from objects.task import STATUS_DONE, Task
+from objects.user import User
 from schemas.onboarding_schemas import InterviewRequest, InterviewResponse, LaunchRequest, LaunchResponse, SignupRequest, SignupResponse
 from utils.agent_prompts import ROLE_ACCOUNT_MANAGER
+from utils.authz import current_user
 from utils.database import Database
 from utils.task_queue import create_task
 
@@ -54,10 +57,21 @@ ONBOARDING_CLIENT_TASKS = ("answer_sme_interview", "grant_access", "upload_photo
 
 
 @router.post("/onboarding/signup", response_model=SignupResponse)
-async def signup(request: SignupRequest) -> SignupResponse:
+async def signup(request: SignupRequest, http_request: Request) -> SignupResponse:
     """Step 0 — the rows everything else hangs off: organization + brand
-    (+ the goal when one was set). NO AUTH YET: no user/membership rows —
-    those arrive with the auth port."""
+    (+ the goal when one was set), claimed by the signed-in caller (a user
+    belongs to exactly ONE org). Re-entry with an unlaunched brand hands the
+    existing ids back instead of 409ing, so a wizard resumed on a fresh
+    device (no sessionStorage) doesn't strand at step 3; a launched brand
+    means the caller shouldn't be in the wizard at all — 409."""
+    user = current_user(http_request)
+    if user.organization_id is not None:
+        existing_brands = await Brand.by_organization_id(user.organization_id)
+        unlaunched = [brand for brand in existing_brands if brand.onboarded_at is None]
+        if not unlaunched:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="you already have an organization")
+        return SignupResponse.create({"organization_id": user.organization_id, "brand_id": unlaunched[0].id})
+
     brand_name = request.brand_name.strip()
     website_url = request.website_url.strip()
     if not brand_name or not website_url:
@@ -78,6 +92,7 @@ async def signup(request: SignupRequest) -> SignupResponse:
     if request.goal_metric and request.goal_target:
         Database.session.add(Goal(brand_id=brand.id, metric=request.goal_metric, target=request.goal_target))
         await Database.session.flush()
+    await User.claim_organization(user.id, organization.id)
     return SignupResponse.create({"organization_id": organization.id, "brand_id": brand.id})
 
 

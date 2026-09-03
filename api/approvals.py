@@ -5,8 +5,9 @@ utils/approval_flow.py — shared with the producers, which run the same
 fan-out at birth for artifacts the brand's preset auto-approves. A human
 verdict here and an auto-approval there set the identical work in motion.
 
-NO AUTH YET (repo-wide) — reviewed_by rides the request body until the
-geoviz token verifier is ported."""
+Auth rides the router-level guard (utils/authz.py): the artifact/change set
+in the path must belong to the caller's org. reviewed_by still rides the
+request body (display name); the verified caller is request.state's user."""
 
 from fastapi import APIRouter, HTTPException, status
 

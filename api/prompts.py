@@ -6,7 +6,8 @@ collection is deferred immediately (corpus-deduped, so re-running is nearly
 free), and the next Sunday visibility_run scores the brand's first trend
 point — #6 is the normal weekly machinery started early, not a special job.
 
-NO AUTH YET (repo-wide) — same posture as the other routers."""
+Auth rides the router-level guard (utils/authz.py): bearer token + the
+brand-in-path must belong to the caller's org."""
 
 from fastapi import APIRouter, HTTPException, status
 

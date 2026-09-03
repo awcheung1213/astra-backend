@@ -4,7 +4,8 @@ bootstrap + run-time discovery hold, add one the client knows about, and
 exclude one that's wrong (excluded = never matched, never resurrected —
 removal is exclusion, not deletion, so discovery can't re-add it).
 
-NO AUTH YET (repo-wide) — same posture as the other routers."""
+Auth rides the router-level guard (utils/authz.py): bearer token + the
+brand-in-path must belong to the caller's org."""
 
 from fastapi import APIRouter, HTTPException, status
 

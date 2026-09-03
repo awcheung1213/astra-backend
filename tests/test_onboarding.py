@@ -11,6 +11,7 @@ import json
 import uuid
 
 from adapters.agents.claude_agent import ClaudeAgent
+from tests._auth import release_runner
 
 EXTRACTION = {"description": "Sells nail polish online.", "category": "Beauty & cosmetics", "audience": "Online nail polish buyers", "differentiators": ["Natural ingredients"]}
 
@@ -23,6 +24,7 @@ def _stub_extraction(monkeypatch):
 
 
 async def _signup(client, **overrides):
+    await release_runner()  # one org per user — free the runner so this signup claims fresh
     payload = {"organization_name": f"test-org-{uuid.uuid4()}", "brand_name": f"test brand {uuid.uuid4()}", "website_url": "https://example.com", "footprint": "national", **overrides}
     response = await client.post("/api/v1/onboarding/signup", json=payload)
     assert response.status_code == 200

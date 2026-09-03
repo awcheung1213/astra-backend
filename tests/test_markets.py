@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 
 from objects.brand_market import BrandMarket
 from objects.market import SOURCE_LOCAL, SOURCE_SYSTEM, Market
+from tests._auth import release_runner
 from utils.database import Database, ReplicaDatabase
 
 
@@ -19,6 +20,7 @@ def _city() -> str:
 
 
 async def _signup(client, **overrides):
+    await release_runner()  # one org per user — free the runner so this signup claims fresh
     payload = {"organization_name": f"test-org-{uuid.uuid4()}", "brand_name": f"test brand {uuid.uuid4()}", "website_url": "https://example.com", **overrides}
     return await client.post("/api/v1/onboarding/signup", json=payload)
 

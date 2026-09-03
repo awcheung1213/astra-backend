@@ -4,7 +4,8 @@ the general facts-editing surface (name, site, description, category,
 audience, differentiators). PATCH semantics: only fields present in the
 request are applied; the schema's extra="forbid" is the whitelist.
 
-NO AUTH YET (repo-wide) — same posture as the other routers."""
+Auth rides the router-level guard (utils/authz.py): bearer token + the
+brand-in-path must belong to the caller's org."""
 
 from fastapi import APIRouter, HTTPException, status
 

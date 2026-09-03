@@ -14,11 +14,12 @@ renders without stitching. Screens -> endpoints:
 
 Deliberately not served: per-city score scoping (dropped 2026-08-30 —
 framework v1 scores brand-level) and a computed site-health score (counts
-only, no invented formula). NO AUTH YET (repo-wide)."""
+only, no invented formula). Auth rides the router-level guard
+(utils/authz.py); GET /brands scopes by the caller's org itself."""
 
 from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
 from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, Artifact
 from objects.brand import Brand
@@ -35,6 +36,7 @@ from objects.prompt_result import PromptResult
 from objects.report import Report
 from objects.task import STATUS_DONE, STATUS_QUEUED, STATUS_RUNNING, Task
 from objects.visibility_run import VisibilityRun
+from utils.authz import current_user
 from worker.tasks.briefs import CLIENT_TASK_NAMES
 
 router = APIRouter(prefix="/api/v1")
@@ -44,9 +46,11 @@ LEDGER_WINDOW_DAYS = 31  # "shipped this month"
 
 
 @router.get("/brands")
-async def brands() -> dict:
-    """Brand discovery for the FE. NO AUTH YET: lists every brand — becomes
-    the signed-in org's brands when the auth port lands."""
+async def brands(request: Request) -> dict:
+    """Brand discovery for the FE — the signed-in caller's org's brands
+    (empty before signup completes)."""
+    user = current_user(request)
+    org_brands = await Brand.by_organization_id(user.organization_id) if user.organization_id else []
     return {
         "brands": [
             {
@@ -61,7 +65,7 @@ async def brands() -> dict:
                 "audience": brand.audience,
                 "differentiators": brand.differentiators,
             }
-            for brand in await Brand.all()
+            for brand in org_brands
         ]
     }
 

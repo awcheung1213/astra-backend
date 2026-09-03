@@ -19,6 +19,7 @@ import settings
 from adapters import google_adapter
 from api.connections import mint_state
 from objects.connection import Connection
+from tests._auth import release_runner
 from utils.database import Database, ReplicaDatabase
 from utils.token_crypto import decrypt_credentials
 
@@ -51,6 +52,7 @@ def _stub_google(monkeypatch, gsc_properties=None, ga4_properties=None):
 
 
 async def _signup(client, website_url="https://example.com"):
+    await release_runner()  # one org per user — free the runner so this signup claims fresh
     payload = {"organization_name": f"test-org-{uuid.uuid4()}", "brand_name": f"test brand {uuid.uuid4()}", "website_url": website_url, "footprint": "national"}
     return (await client.post("/api/v1/onboarding/signup", json=payload)).json()["brand_id"]
 

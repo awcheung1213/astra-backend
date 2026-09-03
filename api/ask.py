@@ -6,7 +6,8 @@ what the assembled facts can support (receipts included), and flag when the
 question actually needs a deep investigation; that flag chains a diagnosis
 task (#23), whose result lands in Pulse.
 
-NO AUTH YET (repo-wide) — same posture as the other routers."""
+Auth rides the router-level guard (utils/authz.py): bearer token + the
+brand-in-path must belong to the caller's org."""
 
 import json
 

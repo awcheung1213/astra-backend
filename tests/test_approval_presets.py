@@ -15,6 +15,7 @@ from objects.artifact import STATUS_AUTO_APPROVED, STATUS_PENDING_REVIEW, Artifa
 from objects.brand import Brand
 from objects.change_set import ChangeSet
 from objects.task import Task
+from tests._auth import release_runner
 from utils.approval_flow import fan_out_approval, initial_artifact_status
 from utils.database import Database, ReplicaDatabase
 
@@ -22,6 +23,7 @@ WP_CREDENTIALS = {"base_url": "sunrisedental.example", "username": "astra", "app
 
 
 async def _signup(client) -> str:
+    await release_runner()  # one org per user — free the runner so this signup claims fresh
     payload = {"organization_name": f"test-org-{uuid.uuid4()}", "brand_name": f"test brand {uuid.uuid4()}", "website_url": "https://example.com", "footprint": "national"}
     return (await client.post("/api/v1/onboarding/signup", json=payload)).json()["brand_id"]
 

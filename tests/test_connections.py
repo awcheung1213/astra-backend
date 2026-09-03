@@ -13,6 +13,7 @@ from adapters.cms.common import CmsWriteError
 from adapters.cms.shopify_adapter import ShopifyAdapter
 from adapters.cms.wordpress_adapter import WordPressAdapter
 from objects.site import Site
+from tests._auth import release_runner
 from utils.database import Database, ReplicaDatabase
 from utils.token_crypto import decrypt_credentials
 
@@ -29,6 +30,7 @@ def _stub_verify(monkeypatch, adapter_class, error: str | None = None):
 
 
 async def _signup_and_launch(client):
+    await release_runner()  # one org per user — free the runner so this signup claims fresh
     payload = {"organization_name": f"test-org-{uuid.uuid4()}", "brand_name": f"test brand {uuid.uuid4()}", "website_url": "https://example.com", "footprint": "national"}
     brand_id = (await client.post("/api/v1/onboarding/signup", json=payload)).json()["brand_id"]
     assert (await client.post(f"/api/v1/brands/{brand_id}/launch")).status_code == 200
@@ -126,6 +128,7 @@ async def test_connect_validation(client):
     response = await client.post(f"/api/v1/brands/{brand_id}/site", json={"platform": "wordpress", "credentials": {"base_url": "x.example"}})
     assert response.status_code == 422 and "app_password" in response.json()["detail"]
     # nothing to disconnect on a brand that never connected
+    await release_runner()
     fresh_payload = {"organization_name": f"test-org-{uuid.uuid4()}", "brand_name": f"test brand {uuid.uuid4()}", "website_url": "https://example.com"}
     fresh_brand_id = (await client.post("/api/v1/onboarding/signup", json=fresh_payload)).json()["brand_id"]
     assert (await client.delete(f"/api/v1/brands/{fresh_brand_id}/site")).status_code == 404

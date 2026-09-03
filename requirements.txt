@@ -8,6 +8,7 @@ openai==2.38.0
 pg8000==1.31.2
 procrastinate[psycopg]==3.9.0
 pydantic==2.13.4
+PyJWT[crypto]==2.10.1
 sqlalchemy[asyncio]==2.0.52
 sqlmodel==0.0.39
 starlette==1.6.0

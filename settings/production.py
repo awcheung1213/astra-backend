@@ -16,3 +16,10 @@ assert CORS_ORIGINS and "*" not in CORS_ORIGINS, "production requires explicit C
 
 # --- credentials crypto (sites/connections credentials_encrypted) ---
 TOKEN_ENCRYPTION_KEY = os.environ["TOKEN_ENCRYPTION_KEY"]
+
+# --- auth (Supabase project; verification fails closed without it) ---
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_PUBLISHABLE_KEY = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "")
+# no test-runner credentials in production on purpose
+TEST_RUNNER_EMAIL = ""
+TEST_RUNNER_PASSWORD = ""

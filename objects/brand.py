@@ -54,6 +54,11 @@ class Brand(SQLModel, BaseObject, table=True):
         return list(rows.scalars().all())
 
     @staticmethod
+    async def by_organization_id(organization_id: str) -> list["Brand"]:
+        rows = await ReplicaDatabase.session.execute(select(Brand).where(Brand.organization_id == organization_id))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
     async def update(id: str, **fields) -> "Brand":
         brand = await Database.session.get(Brand, id)
         if not brand:

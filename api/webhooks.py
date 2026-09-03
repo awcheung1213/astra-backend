@@ -6,8 +6,9 @@ Webhook endpoints must be idempotent: platforms re-deliver. The review's
 (brand, platform, external_id) identity dedupes — a duplicate delivery finds
 its existing row and queues nothing.
 
-NO AUTH YET (repo-wide) — webhook signature verification rides the same
-future pass as the token verifier port."""
+Deliberately registered WITHOUT the auth guard — platforms call this, not
+signed-in users. ⚠ HMAC signature verification is Phase 5; until it lands
+this is the repo's ONE unauthenticated write."""
 
 from datetime import datetime
 

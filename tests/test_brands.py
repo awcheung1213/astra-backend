@@ -5,8 +5,11 @@ Runs in compose (make test), needs the database."""
 
 import uuid
 
+from tests._auth import release_runner
+
 
 async def _signup(client):
+    await release_runner()  # one org per user — free the runner so this signup claims fresh
     payload = {"organization_name": f"test-org-{uuid.uuid4()}", "brand_name": f"test brand {uuid.uuid4()}", "website_url": "https://example.com", "footprint": "national"}
     response = await client.post("/api/v1/onboarding/signup", json=payload)
     assert response.status_code == 200

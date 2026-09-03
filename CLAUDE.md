@@ -75,9 +75,13 @@ inventing structure; update it when a decision changes.
 
 ## Current state / next steps
 
-Scaffold only: all 28 tables from the spec (objects/, file-per-table), index
-route, middleware stack, queue wiring, one stub task (site_audit), adapter base
-with cost metering. No auth yet (port utils/token_verifier.py + utils/authz.py
-from geoviz-backend), no engine services yet (port geoviz-backend/services/ —
-the measurement schema converged deliberately), initial migration not yet
-generated (`make migration "initial schema"`).
+Built well past scaffold: all runners + 17 cron schedules, engine services
+(adapters/services/), connect endpoints (WP/Shopify/Google), onboarding
+wizard backend, approval presets. **Auth is ported (2026-09-02)**: Supabase
+bearer tokens verified locally (utils/token_verifier.py), ONE router-level
+`guard` dependency (utils/authz.py — 401/403 by path-resource ownership),
+one org per user on users.organization_id, `GET /me` bootstrap; local dev +
+tests borrow the geoviz STAGING Supabase project via .env (tests sign in as
+a dedicated runner, tests/_auth.py). Public exceptions: Google OAuth
+callback + review webhook (HMAC = Phase 5). Remaining gaps live in
+astra-onboarding-gaps-plan.md §6c/6d (loose ends, notifier).
