@@ -14,8 +14,7 @@ from sqlmodel import Field, SQLModel
 from objects.base_object import BaseObject
 from utils.database import Database, ReplicaDatabase
 
-ROLE_ADMIN = "admin"
-ROLE_MEMBER = "member"
+ROLE_ADMIN = "admin"  # the only role today — every user claims their own org; more roles arrive with an invite flow
 
 
 class User(SQLModel, BaseObject, table=True):

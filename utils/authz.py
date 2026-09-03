@@ -16,9 +16,10 @@ single `guard` dependency (attached router-level in main.py):
    with none of these params (GET /brands, /me, signup) is authenticated
    only — its handler scopes by the caller itself via current_user().
 
-Roles stay coarse (admin|member) with every seat currently admin;
-ROLE_PERMISSIONS expands them so a finer permission is one entry here, not a
-schema change. 401 = not authenticated. 403 = authenticated, not allowed.
+No role/permission machinery on purpose: every user is their org's admin
+(objects/user.py ROLE_ADMIN) until an invite flow creates a second kind of
+seat — geoviz's ROLE_PERMISSIONS expansion returns here with that flow.
+401 = not authenticated. 403 = authenticated, not allowed.
 
 Deliberately PUBLIC (registered without the guard in main.py): the Google
 OAuth callback (HMAC-signed state IS the auth — Google's redirect carries no
@@ -33,11 +34,6 @@ from objects.report import Report
 from objects.user import User
 from utils.identity import AUTH
 from utils.token_verifier import Principal
-
-ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "admin": {"org.read", "org.write", "org.delete", "billing.manage"},
-    "member": {"org.read", "org.write"},
-}
 
 
 async def guard(request: Request) -> User:
