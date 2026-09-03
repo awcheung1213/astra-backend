@@ -25,37 +25,37 @@ purge: ## Stop the whole stack and DELETE ALL DATA (containers + db volume)
 
 
 .PHONY: shell
-shell: ## Shell into the astra-backend container
+shell: ## Shell into the evergreen-backend container
 	clear
 	@echo Connecting to container
 	@echo -------------------------------
-	docker compose run --rm astra-backend /bin/bash --login
+	docker compose run --rm evergreen-backend /bin/bash --login
 
 
 .PHONY: check
 check: ## Lint, Type Check, and Test
-	docker compose up -d astra-backend-database
+	docker compose up -d evergreen-backend-database
 	clear
 	@echo -------------------------------
 	@echo Linting
 	@echo -------------------------------
-	docker compose run --rm --no-deps astra-backend flake8 . --show-source --statistic
+	docker compose run --rm --no-deps evergreen-backend flake8 . --show-source --statistic
 
 	@echo -------------------------------
 	@echo Type Checking
 	@echo -------------------------------
-	docker compose run --rm --no-deps astra-backend mypy .
+	docker compose run --rm --no-deps evergreen-backend mypy .
 
 	@echo -------------------------------
 	@echo Formatting
 	@echo -------------------------------
-	docker compose run --rm --no-deps astra-backend black --check --diff .
-	docker compose run --rm --no-deps astra-backend isort --check-only --profile black .
+	docker compose run --rm --no-deps evergreen-backend black --check --diff .
+	docker compose run --rm --no-deps evergreen-backend isort --check-only --profile black .
 
 	@echo -------------------------------
 	@echo Testing
 	@echo -------------------------------
-	docker compose run --rm --no-deps astra-backend pytest --disable-pytest-warnings -vv -p no:cacheprovider --show-capture=no
+	docker compose run --rm --no-deps evergreen-backend pytest --disable-pytest-warnings -vv -p no:cacheprovider --show-capture=no
 
 
 .PHONY: lint
@@ -64,7 +64,7 @@ lint: ## Lint
 	@echo -------------------------------
 	@echo Linting
 	@echo -------------------------------
-	docker compose run --rm astra-backend flake8 . --show-source --statistic
+	docker compose run --rm evergreen-backend flake8 . --show-source --statistic
 
 
 .PHONY: type
@@ -73,7 +73,7 @@ type: ## Type Check
 	@echo -------------------------------
 	@echo Type Checking
 	@echo -------------------------------
-	docker compose run --rm astra-backend mypy .
+	docker compose run --rm evergreen-backend mypy .
 
 
 .PHONY: format
@@ -82,8 +82,8 @@ format: ## Format
 	@echo -------------------------------
 	@echo Formatting
 	@echo -------------------------------
-	docker compose run --rm astra-backend black .
-	docker compose run --rm astra-backend isort . --profile black
+	docker compose run --rm evergreen-backend black .
+	docker compose run --rm evergreen-backend isort . --profile black
 
 
 .PHONY: test
@@ -92,7 +92,7 @@ test: ## Test k=filter_expression
 	@echo -------------------------------
 	@echo Testing
 	@echo -------------------------------
-	docker compose run --rm --no-deps astra-backend pytest --disable-pytest-warnings -vv -s -p no:cacheprovider --show-capture=no $(if $(k),-k "$(k)")
+	docker compose run --rm --no-deps evergreen-backend pytest --disable-pytest-warnings -vv -s -p no:cacheprovider --show-capture=no $(if $(k),-k "$(k)")
 
 
 .PHONY: migration
@@ -100,7 +100,7 @@ migration: ## Create database migration
 	clear
 	@echo Creating database migration
 	@echo -------------------------------
-	docker compose run --rm astra-backend alembic revision --autogenerate -m "$(filter-out $@,$(MAKECMDGOALS))"
+	docker compose run --rm evergreen-backend alembic revision --autogenerate -m "$(filter-out $@,$(MAKECMDGOALS))"
 
 
 .PHONY: upgrade
@@ -108,7 +108,7 @@ upgrade: ## Upgrade to latest database migration
 	clear
 	@echo Upgrading the database
 	@echo -------------------------------
-	docker compose run --rm astra-backend alembic upgrade head
+	docker compose run --rm evergreen-backend alembic upgrade head
 
 
 .PHONY: downgrade
@@ -116,7 +116,7 @@ downgrade: ## Downgrade the database
 	clear
 	@echo Downgrading the database
 	@echo -------------------------------
-	docker compose run --rm astra-backend alembic downgrade -1
+	docker compose run --rm evergreen-backend alembic downgrade -1
 
 
 .PHONY: queue-schema
@@ -124,7 +124,7 @@ queue-schema: ## Apply procrastinate's own schema (once per database; also runs 
 	clear
 	@echo Applying the queue schema
 	@echo -------------------------------
-	docker compose run --rm astra-backend procrastinate --app=worker.app.app schema --apply
+	docker compose run --rm evergreen-backend procrastinate --app=worker.app.app schema --apply
 
 
 %: ## ignore all commands that are not defined

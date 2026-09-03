@@ -19,7 +19,7 @@ from tests._auth import release_runner
 from utils.approval_flow import fan_out_approval, initial_artifact_status
 from utils.database import Database, ReplicaDatabase
 
-WP_CREDENTIALS = {"base_url": "sunrisedental.example", "username": "astra", "app_password": "abcd efgh"}
+WP_CREDENTIALS = {"base_url": "sunrisedental.example", "username": "evergreen", "app_password": "abcd efgh"}
 
 
 async def _signup(client) -> str:

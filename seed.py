@@ -2,7 +2,7 @@
 
 Re-run safe: each section checks whether it already ran and skips (step 0).
 
-    docker compose run --rm --no-deps astra-backend python seed.py
+    docker compose run --rm --no-deps evergreen-backend python seed.py
 
 What this sets up, step by step:
   1. system markets — the top 3 cities per state (+DC), ranked by
@@ -167,7 +167,7 @@ async def fetch_county_gdp(web: httpx.AsyncClient) -> dict[str, float]:
 # TEST BRAND WORLD (steps 2-8)
 ##############################
 
-TEST_ORGANIZATION_NAME = "Astra Test Org"
+TEST_ORGANIZATION_NAME = "Evergreen Test Org"
 TEST_BRAND_NAME = "Sunrise Dental"
 TEST_BRAND_WEBSITE = "https://www.sunrisedental.example"
 

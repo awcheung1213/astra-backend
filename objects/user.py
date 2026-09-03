@@ -1,4 +1,4 @@
-"""Users — the geoviz identity pattern collapsed onto astra's one-org-per-
+"""Users — the geoviz identity pattern collapsed onto evergreen's one-org-per-
 user model: no separate memberships table, the org pointer + role live on
 the users row (NULL organization_id = signed up in Supabase but hasn't
 completed signup here yet — the onboarding gate). We key our OWN id and

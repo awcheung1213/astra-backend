@@ -1,7 +1,7 @@
 """The weekly visibility sweep: newest analyzed answer per cell -> per-market
 scores (visibility_run_markets) -> one framework-versioned trend point
 (visibility_runs). Ported from geoviz's report generation, collapsed to
-astra's shape: the run IS the aggregate and the trend point; components are
+evergreen's shape: the run IS the aggregate and the trend point; components are
 computed over the FULL result set (not averaged across markets — framework
 1.0.0 defines it this way on purpose, don't "fix" it back to geoviz's
 average-of-markets). Zero LLM calls — the sweep is $0 and safe to run any

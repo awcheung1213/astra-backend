@@ -38,4 +38,4 @@ class Logger:
             self.logger.log(level, message)
 
 
-logger = Logger("astra-backend")
+logger = Logger("evergreen-backend")

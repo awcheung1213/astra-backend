@@ -6,7 +6,7 @@ when in doubt about structure or idiom, look there first.
 
 ## What this is
 
-Astra: an AI-run SEO agency as a product (the pivot from GeoViz — measurement
+Evergreen: an AI-run SEO agency as a product (the pivot from GeoViz — measurement
 stayed, an acting agency grew around it). One repo, one image, two Railway
 services: `api` (image CMD: uvicorn) and `worker` (python -m worker.run,
 railway.worker.json). They communicate ONLY through Postgres — the typed task

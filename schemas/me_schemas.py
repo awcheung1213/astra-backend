@@ -6,5 +6,5 @@ class MeResponse(BaseResponse):
     email: str
     organization_id: str | None  # null = hasn't completed signup yet
     role: str
-    brand_id: str | None  # the org's brand (astra: one brand per org today)
+    brand_id: str | None  # the org's brand (evergreen: one brand per org today)
     onboarded: bool  # a brand has launched — the FE's dashboard-vs-wizard gate

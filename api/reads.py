@@ -245,7 +245,7 @@ async def report_detail(report_id: str) -> dict:
 # TODO(attribution) GET /brands/{brand_id}/attribution — the "where the
 #       revenue came from" page: four GROUP-BY sums over the leads table
 #       (by source_channel, by AI engine from source_detail, by landing_path
-#       with built-by-Astra provenance via the drafts ledger, by query).
+#       with built-by-Evergreen provenance via the drafts ledger, by query).
 #       ~25 lines; build together with the Shopify orders webhook
 #       (api/webhooks.py's TODO(leads: orders)) — its first data source.
 

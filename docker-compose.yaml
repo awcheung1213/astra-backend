@@ -1,10 +1,10 @@
 services:
- astra-backend:
+ evergreen-backend:
    build: .
-   container_name: astra-backend
+   container_name: evergreen-backend
    command: >
      sh -c "
-      until pg_isready -h astra-backend-database -p 5432 -U postgres; do
+      until pg_isready -h evergreen-backend-database -p 5432 -U postgres; do
         echo 'Waiting for Postgres...';
         sleep 2;
       done;
@@ -22,19 +22,19 @@ services:
    environment:
      - PYTHONPATH=/app
    depends_on:
-     - astra-backend-database
+     - evergreen-backend-database
    stdin_open: true
    tty: true
    networks:
      - default
 
 
- astra-backend-worker:
+ evergreen-backend-worker:
    build: .
-   container_name: astra-backend-worker
+   container_name: evergreen-backend-worker
    command: >
      sh -c "
-      until pg_isready -h astra-backend-database -p 5432 -U postgres; do
+      until pg_isready -h evergreen-backend-database -p 5432 -U postgres; do
         echo 'Waiting for Postgres...';
         sleep 2;
       done;
@@ -48,19 +48,19 @@ services:
    environment:
      - PYTHONPATH=/app
    depends_on:
-     - astra-backend-database
-     - astra-backend
+     - evergreen-backend-database
+     - evergreen-backend
    stdin_open: true
    tty: true
    networks:
      - default
 
 
- astra-backend-database:
+ evergreen-backend-database:
    image: postgres:16-alpine
-   container_name: astra-backend-database
+   container_name: evergreen-backend-database
    volumes:
-     - astra-backend_database_data:/var/lib/postgresql/data
+     - evergreen-backend_database_data:/var/lib/postgresql/data
    environment:
      - POSTGRES_DB=postgres
      - POSTGRES_USER=postgres
@@ -69,4 +69,4 @@ services:
      - "5432:5432"
 
 volumes:
- astra-backend_database_data:
+ evergreen-backend_database_data:

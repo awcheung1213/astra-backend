@@ -16,7 +16,7 @@ KIND_ORDER = "order"
 
 class Lead(SQLModel, BaseObject, table=True):
     """One conversions ledger: local reads counts, stores read dollars.
-    landing_path is the 'built by Astra' attribution join — indexed."""
+    landing_path is the 'built by Evergreen' attribution join — indexed."""
 
     __tablename__ = "leads"
 

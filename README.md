@@ -1,6 +1,6 @@
-# astra-backend
+# evergreen-backend
 
-Astra — the SEO agency in your pocket. One repo, one Docker image, **two Railway
+Evergreen — the SEO agency in your pocket. One repo, one Docker image, **two Railway
 services** that differ only by start command:
 
 | Service | Start command | Config | Job |

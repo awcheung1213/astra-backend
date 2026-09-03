@@ -95,7 +95,7 @@ class PromptResult(SQLModel, BaseObject, table=True):
 
     @staticmethod
     async def assign_visibility_run(ids: list[str], visibility_run_id: str) -> None:
-        """Stamp the scored results with their run — astra's replacement for
+        """Stamp the scored results with their run — evergreen's replacement for
         geoviz's prompt_result <-> visibility_score join table."""
         if not ids:
             return

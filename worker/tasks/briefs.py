@@ -85,7 +85,7 @@ async def client_chase(task_id: str, brand_id: str) -> None:
 CLIENT_TASK_NAMES = {"grant_access", "upload_photos", "answer_sme_interview", "verify_conversion_tracking", "collect_study_data"}
 CHASE_AFTER_DAYS = 3  # how long a client task may sit before the first nudge
 CHASE_COOLDOWN_DAYS = 3  # never nudge the same org more often than this
-CHASE_TITLE = "A gentle nudge from your Astra team"
+CHASE_TITLE = "A gentle nudge from your Evergreen team"
 
 BRIEF_MAX_WORDS = 250
 

@@ -1,7 +1,7 @@
 """Worker service entrypoint.
 
 Railway start command:  python -m worker.run   (railway.worker.json)
-Local:                  the astra-backend-worker service in docker compose
+Local:                  the evergreen-backend-worker service in docker compose
 """
 
 import asyncio

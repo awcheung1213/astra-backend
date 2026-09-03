@@ -4,7 +4,7 @@ import os
 # APP IDENTITY
 ##############################
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "local")
-PROJECT_NAME = "astra-backend"
+PROJECT_NAME = "evergreen-backend"
 REGION = "us-east-1"
 VERSION = "0.1.0"
 

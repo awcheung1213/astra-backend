@@ -166,7 +166,7 @@ def _schema_markup(brand: Brand) -> dict:
 
 async def fetch_page_html(url: str) -> str | None:
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=FETCH_TIMEOUT_SECONDS, headers={"User-Agent": "AstraAudit/1.0"}) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=FETCH_TIMEOUT_SECONDS, headers={"User-Agent": "EvergreenAudit/1.0"}) as client:
             response = await client.get(url)
     except httpx.HTTPError:
         return None

@@ -158,7 +158,7 @@ def finding_key(kind: str, detail: dict) -> tuple[str, str]:
 async def _crawl(base_url: str) -> list[dict]:
     """Fetch robots/sitemap/pages (capped) and run the rule engine."""
     findings: list[dict] = []
-    async with httpx.AsyncClient(follow_redirects=True, timeout=FETCH_TIMEOUT_SECONDS, headers={"User-Agent": "AstraAudit/1.0"}) as client:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=FETCH_TIMEOUT_SECONDS, headers={"User-Agent": "EvergreenAudit/1.0"}) as client:
         robots_url = urljoin(base_url, "/robots.txt")
         robots_txt = await _fetch_text(client, robots_url)
         for blocked_crawler in robots_blocked_agents(robots_txt or ""):

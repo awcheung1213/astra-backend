@@ -1,8 +1,8 @@
 """Authentication + authorization as ONE FastAPI dependency, the geoviz
-pattern adapted to astra's flat resource URLs.
+pattern adapted to evergreen's flat resource URLs.
 
 geoviz nests every tenant route under /organizations/{organization_id}/ and
-guards on that path param. Astra's routes are brand-first
+guards on that path param. Evergreen's routes are brand-first
 (/brands/{brand_id}/...) with a handful of other resource shapes, so the
 single `guard` dependency (attached router-level in main.py):
 

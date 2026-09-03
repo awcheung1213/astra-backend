@@ -134,7 +134,7 @@ async def _check_site_reachability(brand: Brand) -> None:
 
 async def _site_is_reachable(url: str) -> bool:
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=SITE_CHECK_TIMEOUT_SECONDS, headers={"User-Agent": "AstraMonitor/1.0"}) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=SITE_CHECK_TIMEOUT_SECONDS, headers={"User-Agent": "EvergreenMonitor/1.0"}) as client:
             response = await client.get(url)
     except httpx.HTTPError:
         return False
