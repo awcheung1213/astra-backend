@@ -27,6 +27,7 @@ exclude = '''
    ^\.git/
    | ^\.idea/
    | ^alembic
+   | ^tinker\.py$
 '''
 
 

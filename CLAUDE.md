@@ -1,8 +1,11 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working in astra-backend. Current as of 2026-08-19
-(scaffold stage). **This repo deliberately follows geoviz-backend's patterns** —
-when in doubt about structure or idiom, look there first.
+Guidance for Claude Code when working in the Evergreen backend (repo directory is
+still `astra-backend/` — the product was renamed 2026-09-03; directories, compose
+project, and container names were deliberately left alone). Current as of
+2026-09-06 (Phases 1–4 + auth built; Phase 5 loose ends next). **This repo
+deliberately follows geoviz-backend's patterns** — when in doubt about structure
+or idiom, look there first.
 
 ## What this is
 
@@ -22,7 +25,11 @@ inventing structure; update it when a decision changes.
 `make start` (compose: db + api + worker; migrations + queue schema on boot) ·
 `make check` (flake8 + mypy + black/isort --check + pytest) · `make test k=expr` ·
 `make lint` / `make type` / `make format` · `make migration "msg"` ·
-`make upgrade` / `make downgrade` · `make queue-schema` · `make shell` · `make purge`
+`make upgrade` / `make downgrade` · `make queue-schema` · `make shell` · `make purge` ·
+`make tinker` (atomic e2e: `tinker.py` drives the whole onboarding flow through the
+API, then fires every cron schedule by hand and drains the queue in-process — $0 with
+stubbed agents + engines, `args="--live"` for the real API + Anthropic; it stops the
+worker container for the run so nothing double-executes)
 
 ## Conventions (identical to geoviz-backend)
 
@@ -84,4 +91,6 @@ one org per user on users.organization_id, `GET /me` bootstrap; local dev +
 tests borrow the geoviz STAGING Supabase project via .env (tests sign in as
 a dedicated runner, tests/_auth.py). Public exceptions: Google OAuth
 callback + review webhook (HMAC = Phase 5). Remaining gaps live in
-astra-onboarding-gaps-plan.md §6c/6d (loose ends, notifier).
+`../evergreen-onboarding-gaps-plan.md` §8 (Phase 5 loose ends: client-task
+completion endpoint, webhook HMAC, pulse mark-as-read) and §9 (Phase 6
+notifier via Resend) — neither has any code yet.

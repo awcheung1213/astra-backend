@@ -32,6 +32,15 @@ shell: ## Shell into the evergreen-backend container
 	docker compose run --rm evergreen-backend /bin/bash --login
 
 
+.PHONY: tinker
+tinker: ## Atomic e2e run (tinker.py). Stops the live worker so tinker is the ONLY executor, restarts it after. args="--live --steps weekly ..."
+	clear
+	@echo Running tinker.py
+	@echo -------------------------------
+	docker compose stop evergreen-backend-worker
+	docker compose run --rm --no-deps evergreen-backend python tinker.py $(args); status=$$?; docker compose start evergreen-backend-worker; exit $$status
+
+
 .PHONY: check
 check: ## Lint, Type Check, and Test
 	docker compose up -d evergreen-backend-database

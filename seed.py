@@ -33,6 +33,7 @@ import httpx
 from sqlalchemy import select
 
 from objects.brand import Brand
+from objects.brand_market import BrandMarket
 from objects.finding import SEVERITY_SERIOUS, SEVERITY_WARN, Finding
 from objects.market import SOURCE_SYSTEM, Market
 from objects.organization import Organization
@@ -168,8 +169,9 @@ async def fetch_county_gdp(web: httpx.AsyncClient) -> dict[str, float]:
 ##############################
 
 TEST_ORGANIZATION_NAME = "Evergreen Test Org"
-TEST_BRAND_NAME = "Sunrise Dental"
-TEST_BRAND_WEBSITE = "https://www.sunrisedental.example"
+TEST_BRAND_NAME = "Evergreen"
+TEST_BRAND_WEBSITE = "https://www.evergreenofficial.com"
+TEST_BRAND_CITY, TEST_BRAND_STATE = "Mesa", "AZ"  # the local brand's ONE subscribed market
 
 THIS_MONDAY = (datetime.now() - timedelta(days=datetime.now().weekday())).date()
 LAST_MONDAY = THIS_MONDAY - timedelta(days=7)
@@ -187,53 +189,61 @@ async def seed_test_brand_with_history(session) -> None:
     print(f"2.  organization: {test_organization.name} ({test_organization.id})")
 
     # ---- step 3: the brand --------------------------------------------
-    dental_brand = Brand(organization_id=test_organization.id, name=TEST_BRAND_NAME, website_url=TEST_BRAND_WEBSITE, footprint="national")
-    session.add(dental_brand)
+    # Footprint is LOCAL on purpose. The .env carries a Census key, so step 1
+    # also seeds ~154 system markets; a national brand's first fill would
+    # collect active prompts x 154 cities x ACTIVE_ENGINES — a real bill for
+    # a smoke test. A local brand collects only its subscribed brand_markets,
+    # and a local brand with NO subscribed market collects nothing forever,
+    # so subscribe exactly one city here: prompts x 1 x engines.
+    test_brand = Brand(organization_id=test_organization.id, name=TEST_BRAND_NAME, website_url=TEST_BRAND_WEBSITE, footprint="local")
+    session.add(test_brand)
     await session.flush()
-    print(f"3.  brand: {dental_brand.name} ({dental_brand.id})")
+    home_market = await Market.get_or_create_city(TEST_BRAND_CITY, TEST_BRAND_STATE)
+    await BrandMarket.subscribe(test_brand.id, home_market.id)
+    print(f"3.  brand: {test_brand.name} ({test_brand.id}) — local footprint, 1 market: {home_market.city}, {home_market.state}")
 
     # ---- step 4: a pending site ---------------------------------------
     # pending, NOT connected: a "connected" row with NULL credentials would
     # dead-letter change_set_apply on a raw InvalidToken the first time an
     # approved draft dispatches. Connect a real WP/Shopify sandbox through
     # POST /brands/{id}/site to exercise the apply path.
-    pending_site = Site(brand_id=dental_brand.id, platform="wordpress")
+    pending_site = Site(brand_id=test_brand.id, platform="wordpress")
     session.add(pending_site)
     await session.flush()
     print(f"4.  pending site: {pending_site.platform} ({pending_site.id}) — connect a real one via POST /brands/{{id}}/site")
 
-    # ---- step 5: two DONE visibility runs (the Brief's trend) ---------
-    last_week_run = VisibilityRun(brand_id=dental_brand.id, week_of=LAST_MONDAY, status=RUN_DONE, overall_score=LAST_WEEK_OVERALL_SCORE, detection_rate=0.40, share_of_voice=0.22, positive_rate=0.30, top3_rate=0.25, citation_rate=0.10)
-    this_week_run = VisibilityRun(brand_id=dental_brand.id, week_of=THIS_MONDAY, status=RUN_DONE, overall_score=THIS_WEEK_OVERALL_SCORE, detection_rate=0.50, share_of_voice=0.28, positive_rate=0.35, top3_rate=0.30, citation_rate=0.12)
-    session.add(last_week_run)
-    session.add(this_week_run)
-    await session.flush()
-    print(f"5.  visibility runs: {LAST_WEEK_OVERALL_SCORE} (last week) -> {THIS_WEEK_OVERALL_SCORE} (this week)")
+    # # ---- step 5: two DONE visibility runs (the Brief's trend) ---------
+    # last_week_run = VisibilityRun(brand_id=test_brand.id, week_of=LAST_MONDAY, status=RUN_DONE, overall_score=LAST_WEEK_OVERALL_SCORE, detection_rate=0.40, share_of_voice=0.22, positive_rate=0.30, top3_rate=0.25, citation_rate=0.10)
+    # this_week_run = VisibilityRun(brand_id=test_brand.id, week_of=THIS_MONDAY, status=RUN_DONE, overall_score=THIS_WEEK_OVERALL_SCORE, detection_rate=0.50, share_of_voice=0.28, positive_rate=0.35, top3_rate=0.30, citation_rate=0.12)
+    # session.add(last_week_run)
+    # session.add(this_week_run)
+    # await session.flush()
+    # print(f"5.  visibility runs: {LAST_WEEK_OVERALL_SCORE} (last week) -> {THIS_WEEK_OVERALL_SCORE} (this week)")
 
-    # ---- step 6: open findings (the Brief's site-health section) ------
-    fresh_finding = Finding(brand_id=dental_brand.id, site_id=pending_site.id, kind="missing_schema", severity=SEVERITY_WARN, summary="Page has no structured data (ld+json): /services")
-    old_finding = Finding(brand_id=dental_brand.id, site_id=pending_site.id, kind="blocked_ai_crawler", severity=SEVERITY_SERIOUS, summary="robots.txt blocks GPTBot — invisible to that AI engine", created_at=datetime.now() - timedelta(days=20))
-    session.add(fresh_finding)
-    session.add(old_finding)
-    await session.flush()
-    print("6.  findings: 1 fresh (missing_schema), 1 old (blocked_ai_crawler)")
+    # # ---- step 6: open findings (the Brief's site-health section) ------
+    # fresh_finding = Finding(brand_id=test_brand.id, site_id=pending_site.id, kind="missing_schema", severity=SEVERITY_WARN, summary="Page has no structured data (ld+json): /services")
+    # old_finding = Finding(brand_id=test_brand.id, site_id=pending_site.id, kind="blocked_ai_crawler", severity=SEVERITY_SERIOUS, summary="robots.txt blocks GPTBot — invisible to that AI engine", created_at=datetime.now() - timedelta(days=20))
+    # session.add(fresh_finding)
+    # session.add(old_finding)
+    # await session.flush()
+    # print("6.  findings: 1 fresh (missing_schema), 1 old (blocked_ai_crawler)")
 
-    # ---- step 7: internal work completed this week --------------------
-    session.add(Task(brand_id=dental_brand.id, name="site_audit", status=STATUS_DONE, finished_at=datetime.now() - timedelta(days=1)))
-    session.add(Task(brand_id=dental_brand.id, name="visibility_run", status=STATUS_DONE, finished_at=datetime.now() - timedelta(days=1)))
-    await session.flush()
-    print("7.  completed this week: site_audit, visibility_run")
+    # # ---- step 7: internal work completed this week --------------------
+    # session.add(Task(brand_id=test_brand.id, name="site_audit", status=STATUS_DONE, finished_at=datetime.now() - timedelta(days=1)))
+    # session.add(Task(brand_id=test_brand.id, name="visibility_run", status=STATUS_DONE, finished_at=datetime.now() - timedelta(days=1)))
+    # await session.flush()
+    # print("7.  completed this week: site_audit, visibility_run")
 
-    # ---- step 8: overdue client-contribution tasks --------------------
-    # Inserted directly (NOT via create_task): client tasks are rows that
-    # never get a queue job — exactly what client_chase scans for.
-    client_task_backdate = datetime.now() - timedelta(days=CLIENT_TASK_BACKDATE_DAYS)
-    session.add(Task(brand_id=dental_brand.id, name="grant_access", status=STATUS_QUEUED, created_at=client_task_backdate))
-    session.add(Task(brand_id=dental_brand.id, name="upload_photos", status=STATUS_QUEUED, created_at=client_task_backdate))
-    await session.flush()
-    print(f"8.  overdue client tasks: grant_access, upload_photos (waiting {CLIENT_TASK_BACKDATE_DAYS} days)")
+    # # ---- step 8: overdue client-contribution tasks --------------------
+    # # Inserted directly (NOT via create_task): client tasks are rows that
+    # # never get a queue job — exactly what client_chase scans for.
+    # client_task_backdate = datetime.now() - timedelta(days=CLIENT_TASK_BACKDATE_DAYS)
+    # session.add(Task(brand_id=test_brand.id, name="grant_access", status=STATUS_QUEUED, created_at=client_task_backdate))
+    # session.add(Task(brand_id=test_brand.id, name="upload_photos", status=STATUS_QUEUED, created_at=client_task_backdate))
+    # await session.flush()
+    # print(f"8.  overdue client tasks: grant_access, upload_photos (waiting {CLIENT_TASK_BACKDATE_DAYS} days)")
 
-    print(f"\nseeded. brand_id for tinker.py: {dental_brand.id}")
+    # print(f"\nseeded. brand_id for tinker.py: {test_brand.id}")
 
 
 ##############################

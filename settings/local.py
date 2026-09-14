@@ -16,7 +16,7 @@ CORS_ORIGINS = ["*"]  # any origin — local dev only
 
 # --- credentials crypto (sites/connections credentials_encrypted) ---
 # fixed dev key — real environments require their own via env var
-TOKEN_ENCRYPTION_KEY = base64.urlsafe_b64encode(b"evergreen-local-dev-key-0123456789ab").decode()
+TOKEN_ENCRYPTION_KEY = base64.urlsafe_b64encode(b"evergreen-local-dev-key-01234567").decode()
 
 # --- auth (Supabase project; the geoviz pattern: verify locally via JWKS) ---
 # The sentinel default lets the app import/boot without a project — every
