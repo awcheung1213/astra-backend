@@ -23,6 +23,13 @@ ENGINE_MAX_CONCURRENCY = int(os.environ.get("ENGINE_MAX_CONCURRENCY", "32"))
 
 # provider API keys, read straight from env (empty = engine unusable at call
 # time; adapters construct clients lazily so an engine that's off needs no key)
+# #9 technical_fix (agent-tools-plan.md Phase 2): "generators" = the per-kind $0
+# code path; "agent" = one Technical-agent run per audit with CMS read tools.
+# Flip per environment after comparing proposals on the same findings.
+TECHNICAL_FIX_MODE = os.environ.get("TECHNICAL_FIX_MODE", "generators")
+# lifetime token budget (input + output) for one agent-mode technical_fix run
+TECHNICAL_FIX_TOKEN_BUDGET = int(os.environ.get("TECHNICAL_FIX_TOKEN_BUDGET", "150000"))
+
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")

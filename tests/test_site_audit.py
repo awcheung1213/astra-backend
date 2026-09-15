@@ -1,6 +1,21 @@
 """Audit rule engine — pure functions over fetched text."""
 
-from worker.tasks.site_audit import KIND_MISSING_H1, KIND_MISSING_META_DESCRIPTION, KIND_MISSING_SCHEMA, KIND_MISSING_TITLE, KIND_SLOW_PAGE, extract_internal_links, finding_key, is_sitemap_document, page_findings, robots_blocked_agents, robots_sitemap_urls, sitemap_candidate_urls
+from worker.tasks.site_audit import (
+    KIND_MISSING_H1,
+    KIND_MISSING_META_DESCRIPTION,
+    KIND_MISSING_SCHEMA,
+    KIND_MISSING_TITLE,
+    KIND_SLOW_PAGE,
+    extract_internal_links,
+    finding_key,
+    is_sitemap_document,
+    page_facts,
+    page_findings,
+    seo_plugin,
+    robots_blocked_agents,
+    robots_sitemap_urls,
+    sitemap_candidate_urls,
+)
 
 GOOD_HTML = """
 <html><head><title>Best Nail Salon</title>
@@ -74,3 +89,21 @@ def test_sitemap_document_requires_sitemap_xml_not_just_a_200():
     assert is_sitemap_document("text/xml; charset=UTF-8", "<sitemapindex><sitemap><loc>https://x.com/a.xml</loc></sitemap></sitemapindex>")
     assert not is_sitemap_document("text/html; charset=UTF-8", "<html><body>Not found</body></html>")  # soft-404
     assert not is_sitemap_document("application/xml", "<rss><channel></channel></rss>")
+
+
+def test_page_facts_capture_what_the_crawler_saw():
+    html = '<html><head><title> Best <b>Nail</b> Salon </title><meta content="A very good salon." name="description"></head><body><h1>Welcome</h1><h1></h1><script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization"},{"@type":["WebSite","Thing"]}]}</script><script type="application/ld+json">not json</script><p>Hello there world</p></body></html>'
+    facts = page_facts(html, elapsed_seconds=1.234)
+    assert facts == {"title": "Best Nail Salon", "meta_description": "A very good salon.", "h1s": ["Welcome"], "ld_json_types": ["Organization", "WebSite", "Thing"], "word_count": 7, "seo_plugin": None, "elapsed_seconds": 1.23}
+
+
+def test_findings_carry_the_page_facts():
+    (finding,) = page_findings("https://x.com/", '<html><head><title>t</title><meta name="description" content="d"></head><body><h1>h</h1></body></html>', 0.1)
+    assert finding["kind"] == KIND_MISSING_SCHEMA
+    assert finding["detail"]["facts"]["title"] == "t" and finding["detail"]["facts"]["ld_json_types"] == []
+
+
+def test_seo_plugin_detected_from_head_markers():
+    assert seo_plugin("<html><head><!-- This site is optimized with the Yoast SEO plugin v22 --><title>t</title></head></html>") == "yoast"
+    assert seo_plugin('<html><head><meta name="generator" content="Rank Math WordPress SEO plugin"></head></html>') == "rank_math"
+    assert seo_plugin("<html><head><title>plain</title></head><body>no plugin</body></html>") is None

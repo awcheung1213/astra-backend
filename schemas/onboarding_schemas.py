@@ -1,4 +1,5 @@
 from schemas.base_schemas import BaseRequest, BaseResponse
+from schemas.brand_schemas import ApprovalPreset
 
 
 class SignupRequest(BaseRequest):
@@ -22,7 +23,7 @@ class LaunchRequest(BaseRequest):
 
     goal_metric: str | None = None  # leads | revenue
     goal_target: float | None = None
-    approval_preset: str | None = None  # review_everything | balanced | hands_off
+    approval_preset: ApprovalPreset | None = None
 
 
 class LaunchResponse(BaseResponse):

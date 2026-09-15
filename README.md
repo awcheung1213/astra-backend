@@ -42,7 +42,7 @@ built yet — chained/event runners register in the same change as their produce
 
 | # | Deliverable | Where it lives |
 |---|---|---|
-| 9 | Technical fixes from ongoing monitoring | `worker/tasks/fixes.py` (`technical_fix` + `technical_judgment`), chained per new finding from `site_audit.py` |
+| 9 | Technical fixes from ongoing monitoring | `worker/tasks/fixes.py` (`technical_fix`: per-kind generators or ONE Technical-agent run per audit with CMS read tools, `TECHNICAL_FIX_MODE`; `technical_judgment` = generators-mode escalation), chained once per audit from `site_audit.py`; playbooks in `skills/seo/` |
 | 10 | Content calendar | `worker/tasks/content.py` `content_calendar` (monthly cron) |
 | 11 | New content produced & published | `worker/tasks/content.py` `content_draft` *(planned)* — fans out from the APPROVED calendar, never cron |
 | 12 | Existing-page optimization / refresh | `worker/tasks/content.py` `content_refresh` *(planned)* — chained from `alert_detection` |

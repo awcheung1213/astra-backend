@@ -50,7 +50,9 @@ class Task(SQLModel, BaseObject, table=True):
 
     @staticmethod
     async def first_queued(brand_id: str, name: str) -> "Task | None":
-        rows = await ReplicaDatabase.session.execute(select(Task).where(Task.brand_id == brand_id).where(Task.name == name).where(Task.status == STATUS_QUEUED).limit(1))
+        # oldest first: a hand-run or a runner draining a queue must take the
+        # rows in the order they were produced (calendar entry 0 before 4)
+        rows = await ReplicaDatabase.session.execute(select(Task).where(Task.brand_id == brand_id).where(Task.name == name).where(Task.status == STATUS_QUEUED).order_by(Task.created_at).limit(1))  # type: ignore[arg-type]
         return rows.scalars().first()
 
     @staticmethod

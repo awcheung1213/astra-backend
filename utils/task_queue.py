@@ -79,8 +79,6 @@ async def task_lifecycle(task_id: str) -> AsyncIterator[Task]:
     async with ReplicaDatabase().connection():
         async with Database().connection():
             task = await Task.get(task_id)
-            # plain copies: rollback() expires ORM instances, and re-reading an
-            # expired attribute on an async session raises MissingGreenlet
             task_name, task_brand_id = task.name, task.brand_id
             logger.info(f"[{task_name}] started (task {task_id}, brand {task_brand_id})", priority="medium")
             await Task.update_status(task_id, STATUS_RUNNING)

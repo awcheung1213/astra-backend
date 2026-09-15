@@ -23,11 +23,6 @@ from worker.app import app
 
 @app.task(name="research_prompts", queue="research", retry=2)
 async def research_prompts(task_id: str, brand_id: str) -> None:
-    """#4 — AI-prompt research -> the brand's target query list. Generated
-    prompts land INACTIVE (source=generated) for human sign-off; activation
-    is the prompt sign-off endpoint's job (which also starts the #6 baseline
-    collection). Re-runs dedupe against existing prompt text, so a plan-update
-    re-fire only ADDS."""
     async with task_lifecycle(task_id):
         brand = await Brand.get(brand_id)
         existing_prompts = await Prompt.by_brand(brand_id)
@@ -59,9 +54,6 @@ async def research_prompts(task_id: str, brand_id: str) -> None:
 
 @app.task(name="research_competitors", queue="research", retry=2)
 async def research_competitors(task_id: str, brand_id: str) -> None:
-    """#5 (bootstrap half) — one call seeding the brand's competitor list so
-    matching works from day one; run-time discovery (collection.py's ~5%
-    sampling) grows it from here. Upserts, so a retry never duplicates."""
     async with task_lifecycle(task_id):
         brand = await Brand.get(brand_id)
 
@@ -95,10 +87,6 @@ GSC_QUERY_LIMIT = 25  # top real queries riding the research prompt
 
 
 async def _gsc_top_queries(brand: Brand) -> list[dict]:
-    """#4's keyword half: the brand's real GSC queries ground generation in
-    actual demand. Best-effort — research works fine without GSC, so a
-    missing connection or a failed pull degrades to an empty list. Branded
-    queries are filtered mechanically: the generation rule is brandless."""
     gsc_connection = next((connection for connection in await Connection.connected_for_brand(brand.id) if connection.provider == "gsc"), None)
     if gsc_connection is None:
         return []

@@ -240,14 +240,16 @@ async def schedule_quarterly_reviews(timestamp: int) -> None:
 #
 # Chained from other work (the producing worker calls create_task; scheduling
 # them on cron would double-run them):
-#   #9  technical_fix — the site_audit runner (#3, Sundays) emits one per
-#       actionable finding as it lands; the fix generators consume them.
+#   #9  technical_fix — the site_audit runner (#3, Sundays) emits ONE per
+#       audit carrying its new fixable finding ids; generators or the
+#       Technical agent propose (settings.TECHNICAL_FIX_MODE).
 #   #12 content_refresh — the alert detector (#19, Mondays) emits one per
 #       decayed/underperforming page it flags.
 #   #11 content_draft — fans out from the APPROVED content calendar (#10).
 #   #23 algorithm-update triage — the alert detector (#19) emits diagnosis
 #       tasks when it sees an update-shaped change-point; "as needed" has no cron.
-#   technical_judgment — escalated by the fix generators (#9) per finding.
+#   technical_judgment — generators mode only: escalated per finding the
+#       fix map can't derive (agent mode skips with a reason instead).
 #
 # Event-driven (webhooks / client actions on the API side):
 #   review_response — new-review webhooks; fast reply is the point.

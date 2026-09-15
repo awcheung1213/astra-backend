@@ -16,6 +16,7 @@ The writes themselves live in adapters/cms/ (rule 6 — the only door to the
 outside world); a platform not in APPLY_ENABLED_PLATFORMS still gets its
 change set recorded at approval (durable, pending), just never enqueued."""
 
+from adapters.cms.common import CmsWriteError
 from adapters.cms.shopify_adapter import ShopifyAdapter
 from adapters.cms.wordpress_adapter import WordPressAdapter
 from objects.artifact import Artifact
@@ -72,6 +73,20 @@ APPLY_ENABLED_PLATFORMS: set[str] = {"wordpress", "shopify"}
 ##############################
 
 
+def native_field(platform: str, field: str) -> str | None:
+    """The CMS-native field a proposal's field name writes on this platform,
+    or None when the platform has no such slot (or no adapter). Proposal
+    validation uses this so a bad field is refused at proposal time, not at
+    apply time."""
+    adapter_class = ADAPTER_BY_PLATFORM.get(platform)
+    if adapter_class is None:
+        return None
+    try:
+        return adapter_class.resolve_field(field)
+    except CmsWriteError:
+        return None
+
+
 def operations_for_artifact(artifact: Artifact) -> list[dict] | None:
     """The mechanical operations an approved artifact converts to, or None
     when the type has no mechanical form (prose judgment proposals) — those
@@ -100,9 +115,11 @@ def _operation(index: int, op: str, target: str | None, value, field: str | None
 def invert_operations(change_set: ChangeSet) -> list[dict] | None:
     """The revert payload: each COMPLETED operation flipped from what its
     apply recorded, in reverse order of application — set_field/update_page
-    restore previous_value; publish_page becomes unpublish_page(created_ref).
-    None when any completed op has nothing to flip (a pre-created_ref publish,
-    an unpublish itself); the caller reports instead of guessing."""
+    restore previous_value OF THE SAME FIELD (the adapter contract: read the
+    field, write the field, so the record always fits the slot it came from);
+    publish_page becomes unpublish_page(created_ref). None when any completed
+    op has nothing to flip (a pre-created_ref publish, an unpublish itself);
+    the caller reports instead of guessing."""
     inverse_operations = []
     completed_operations = [operation for operation in change_set.operations if operation.get("completed_at")]
     for index, operation in enumerate(reversed(completed_operations)):
@@ -131,4 +148,4 @@ async def _apply_operation(site: Site, operation: dict) -> dict:
     return await adapter_class(site).apply(operation)
 
 
-ADAPTER_BY_PLATFORM = {"wordpress": WordPressAdapter, "shopify": ShopifyAdapter}
+ADAPTER_BY_PLATFORM: dict[str, type[WordPressAdapter] | type[ShopifyAdapter]] = {"wordpress": WordPressAdapter, "shopify": ShopifyAdapter}

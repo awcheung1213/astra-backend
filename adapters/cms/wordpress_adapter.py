@@ -1,22 +1,22 @@
-"""WordPress write adapter — the change-set engine's WordPress arm.
+"""WordPress adapter — the change-set engine's WordPress arm, plus the
+Technical agent's read primitives (get_page / get_settings / list_pages).
 
 Auth: REST API application password (basic auth). Encrypted credentials
 shape on the site row: {"base_url": ..., "username": ..., "app_password": ...}.
 
-Field-mapping honesty:
-- title and h1 both write the post/page TITLE (themes render it as the h1).
-- meta_description writes the EXCERPT — core WordPress has no meta
-  description field; most SEO plugins fall back to the excerpt.
-  TODO: write the installed SEO plugin's own field (e.g. Yoast) once plugin
-  detection exists.
-- schema_markup appends an ld+json script block to the content; the
-  rollback record is the whole previous content.
+Fields are the CMS's NATIVE ones — `title`, `excerpt`, `content` — with two
+aliases kept for older proposals: `h1` -> title (themes render the page title
+as the H1) and `meta_description` -> excerpt (core WordPress has no meta
+description field; most SEO plugins fall back to the excerpt). Anything
+composite (a JSON-LD block, a fixed link) is a `content` write the agent
+composes after READING the current content — there are no per-SEO-feature
+branches here on purpose (agent-tools-plan.md Phase 1).
 
-Contract with the engine: every write READS the current value first and
-returns it as previous_value (reverts are built from it); anything created
-returns created_ref."""
+Contract with the engine: every write READS the current value of the SAME
+field first and returns it as previous_value (reverts restore it); anything
+created returns created_ref."""
 
-import json
+from urllib.parse import urlparse
 
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.session import HttpMethod
@@ -28,10 +28,22 @@ from utils.token_crypto import decrypt_credentials
 
 
 class WordPressAdapter:
+    NATIVE_FIELDS = ("title", "excerpt", "content")
+    FIELD_ALIASES = {"h1": "title", "meta_description": "excerpt"}
+
     def __init__(self, site: Site) -> None:
         credentials = decrypt_credentials(site.credentials_encrypted or "")
         self.base_url = credentials["base_url"].rstrip("/")
         self.auth = (credentials["username"], credentials["app_password"])
+
+    @classmethod
+    def resolve_field(cls, field: str) -> str:
+        """The native field a proposal's field name writes; CmsWriteError for
+        anything this CMS has no slot for."""
+        native = cls.FIELD_ALIASES.get(field, field)
+        if native not in cls.NATIVE_FIELDS:
+            raise CmsWriteError(f"wordpress has no writable field {field!r} (native: {', '.join(cls.NATIVE_FIELDS)})")
+        return native
 
     async def verify(self) -> None:
         """Cheap authed read proving base_url + credentials actually work.
@@ -55,24 +67,36 @@ class WordPressAdapter:
             raise CmsWriteError(f"wordpress adapter does not know operation {operation['op']!r}")
 
     ##############################
+    # READS (the agent's eyes — never write)
+    ##############################
+
+    async def get_page(self, url: str) -> dict:
+        """The page behind a live URL with its RAW native field values."""
+        async with site_session(timeout=WRITE_TIMEOUT_SECONDS, auth=self.auth) as client:
+            kind, page = await self._page_for_url(client, url)
+        return _page_summary(kind, page, include_content=True)
+
+    async def get_settings(self) -> dict:
+        """Site-level facts: name, tagline, front-page mode, base URL."""
+        async with site_session(timeout=WRITE_TIMEOUT_SECONDS, auth=self.auth) as client:
+            settings = await self._request(client, "GET", "/wp-json/wp/v2/settings")
+        return {"title": settings.get("title"), "description": settings.get("description"), "url": settings.get("url"), "show_on_front": settings.get("show_on_front"), "page_on_front": settings.get("page_on_front")}
+
+    async def list_pages(self) -> list[dict]:
+        """Published pages (id, url, slug, title) — no content, so it stays small."""
+        async with site_session(timeout=WRITE_TIMEOUT_SECONDS, auth=self.auth) as client:
+            pages = await self._request(client, "GET", "/wp-json/wp/v2/pages?per_page=100&status=publish&context=edit")
+        return [_page_summary("pages", page, include_content=False) for page in pages]
+
+    ##############################
     # OPERATIONS
     ##############################
 
     async def _set_field(self, client: AsyncSession, kind: str, page: dict, field: str, value) -> dict:
-        if field in ("title", "h1"):
-            previous_value = _raw(page.get("title"))
-            await self._request(client, "POST", f"/wp-json/wp/v2/{kind}/{page['id']}", {"title": value})
-            return {"previous_value": previous_value}
-        if field == "meta_description":
-            previous_value = _raw(page.get("excerpt"))
-            await self._request(client, "POST", f"/wp-json/wp/v2/{kind}/{page['id']}", {"excerpt": value})
-            return {"previous_value": previous_value}
-        if field == "schema_markup":
-            previous_content = _raw(page.get("content"))
-            content_with_schema = f'{previous_content}\n<script type="application/ld+json">{json.dumps(value)}</script>'
-            await self._request(client, "POST", f"/wp-json/wp/v2/{kind}/{page['id']}", {"content": content_with_schema})
-            return {"previous_value": previous_content}  # rollback restores the whole content
-        raise CmsWriteError(f"wordpress adapter does not know field {field!r}")
+        native = self.resolve_field(field)
+        previous_value = _raw(page.get(native))
+        await self._request(client, "POST", f"/wp-json/wp/v2/{kind}/{page['id']}", {native: value})
+        return {"previous_value": previous_value}
 
     async def _update_page(self, client: AsyncSession, kind: str, page: dict, value: dict) -> dict:
         previous_value = {"title": _raw(page.get("title")), "meta_description": _raw(page.get("excerpt")), "body_markdown": _raw(page.get("content"))}
@@ -93,14 +117,27 @@ class WordPressAdapter:
     ##############################
 
     async def _page_for_url(self, client: AsyncSession, url: str) -> tuple[str, dict]:
-        """Resolve a live URL to its WP object: pages first, posts as fallback.
-        context=edit returns RAW field values — what reads/writes round-trip on."""
+        """Resolve a live URL to its WP object: the homepage via the site's
+        front-page setting, anything else by slug — pages first, posts as
+        fallback. context=edit returns RAW field values — what reads/writes
+        round-trip on."""
+        if not urlparse(url).path.strip("/"):
+            return "pages", await self._front_page(client)
         slug = path_slug(url)
         for kind in ("pages", "posts"):
             matches = await self._request(client, "GET", f"/wp-json/wp/v2/{kind}?slug={slug}&context=edit")
             if matches:
                 return kind, matches[0]
         raise CmsWriteError(f"no wordpress page or post with slug {slug!r} (from {url})")
+
+    async def _front_page(self, client: AsyncSession) -> dict:
+        """The homepage has no slug: WordPress's Reading setting says whether it
+        is a static page (page_on_front) or the posts index — the latter has no
+        page object to write to, so that is a clear error, not a guess."""
+        settings = await self._request(client, "GET", "/wp-json/wp/v2/settings")
+        if settings.get("show_on_front") != "page" or not settings.get("page_on_front"):
+            raise CmsWriteError("the homepage is the posts index, not a page — nothing to write to (set a static front page in Settings > Reading)")
+        return await self._request(client, "GET", f"/wp-json/wp/v2/pages/{settings['page_on_front']}?context=edit")
 
     async def _request(self, client: AsyncSession, method: HttpMethod, path: str, json_body: dict | None = None):
         try:
@@ -115,3 +152,10 @@ class WordPressAdapter:
 def _raw(field_payload: dict | None) -> str:
     """WP rich fields come as {'raw': ..., 'rendered': ...} under context=edit."""
     return (field_payload or {}).get("raw") or ""
+
+
+def _page_summary(kind: str, page: dict, include_content: bool) -> dict:
+    summary = {"id": page.get("id"), "kind": kind, "url": page.get("link"), "slug": page.get("slug"), "status": page.get("status"), "title": _raw(page.get("title")), "excerpt": _raw(page.get("excerpt"))}
+    if include_content:
+        summary["content"] = _raw(page.get("content"))
+    return summary

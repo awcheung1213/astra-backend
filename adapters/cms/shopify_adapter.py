@@ -8,17 +8,16 @@ the site row: {"shop_domain": "example.myshopify.com", "client_id": ...,
 same Shopify organization, and its released version must carry the
 read_content/write_content scopes (Pages).
 
-Field-mapping honesty:
-- title and h1 both write the page TITLE (themes render it as the h1).
-- meta_description writes the page's global.description_tag METAFIELD —
-  Shopify's real meta description slot.
-- schema_markup appends an ld+json script block to body_html; the rollback
-  record is the whole previous body_html.
+Fields are the CMS's NATIVE ones — `title`, `body_html`, `meta_description`
+(the global.description_tag METAFIELD, Shopify's real meta description slot)
+— with aliases `h1` -> title (themes render the title as the H1) and
+`content` -> body_html. Composite changes (a JSON-LD block) are a body_html
+write the agent composes after READING the current body — no per-SEO-feature
+branches (agent-tools-plan.md Phase 1).
 
-Contract with the engine: every write READS the current value first and
-returns it as previous_value; anything created returns created_ref."""
-
-import json
+Contract with the engine: every write READS the current value of the SAME
+field first and returns it as previous_value; anything created returns
+created_ref. Also carries the Technical agent's read primitives."""
 
 import httpx
 
@@ -30,6 +29,18 @@ API_VERSION = "2024-07"
 
 
 class ShopifyAdapter:
+    NATIVE_FIELDS = ("title", "body_html", "meta_description")
+    FIELD_ALIASES = {"h1": "title", "content": "body_html"}
+
+    @classmethod
+    def resolve_field(cls, field: str) -> str:
+        """The native field a proposal's field name writes; CmsWriteError for
+        anything this CMS has no slot for."""
+        native = cls.FIELD_ALIASES.get(field, field)
+        if native not in cls.NATIVE_FIELDS:
+            raise CmsWriteError(f"shopify has no writable field {field!r} (native: {', '.join(cls.NATIVE_FIELDS)})")
+        return native
+
     def __init__(self, site: Site) -> None:
         credentials = decrypt_credentials(site.credentials_encrypted or "")
         self.shop_domain = credentials["shop_domain"]
@@ -61,22 +72,42 @@ class ShopifyAdapter:
             raise CmsWriteError(f"shopify adapter does not know operation {operation['op']!r}")
 
     ##############################
+    # READS (the agent's eyes — never write)
+    ##############################
+
+    async def get_page(self, url: str) -> dict:
+        """The store page behind a live URL with its native field values."""
+        async with httpx.AsyncClient(timeout=WRITE_TIMEOUT_SECONDS) as client:
+            page = await self._page_for_url(client, url)
+            description = await self._description_metafield(client, page)
+        return {"id": page.get("id"), "url": self._page_url(page), "handle": page.get("handle"), "title": page.get("title"), "body_html": page.get("body_html") or "", "meta_description": (description or {}).get("value")}
+
+    async def get_settings(self) -> dict:
+        """Store-level facts: name and domains."""
+        async with httpx.AsyncClient(timeout=WRITE_TIMEOUT_SECONDS) as client:
+            shop = (await self._request(client, "GET", "/shop.json")).get("shop") or {}
+        return {"name": shop.get("name"), "domain": shop.get("domain"), "myshopify_domain": shop.get("myshopify_domain")}
+
+    async def list_pages(self) -> list[dict]:
+        """Store pages (id, url, handle, title) — no body, so it stays small."""
+        async with httpx.AsyncClient(timeout=WRITE_TIMEOUT_SECONDS) as client:
+            pages = (await self._request(client, "GET", "/pages.json?limit=250&fields=id,handle,title")).get("pages") or []
+        return [{"id": page.get("id"), "url": self._page_url(page), "handle": page.get("handle"), "title": page.get("title")} for page in pages]
+
+    def _page_url(self, page: dict) -> str:
+        return f"https://{self.shop_domain}/pages/{page.get('handle', '')}"
+
+    ##############################
     # OPERATIONS
     ##############################
 
     async def _set_field(self, client: httpx.AsyncClient, page: dict, field: str, value) -> dict:
-        if field in ("title", "h1"):
-            previous_value = page.get("title")
-            await self._request(client, "PUT", f"/pages/{page['id']}.json", {"page": {"id": page["id"], "title": value}})
-            return {"previous_value": previous_value}
-        if field == "meta_description":
+        native = self.resolve_field(field)
+        if native == "meta_description":
             return await self._set_description_metafield(client, page, value)
-        if field == "schema_markup":
-            previous_body = page.get("body_html") or ""
-            body_with_schema = f'{previous_body}\n<script type="application/ld+json">{json.dumps(value)}</script>'
-            await self._request(client, "PUT", f"/pages/{page['id']}.json", {"page": {"id": page["id"], "body_html": body_with_schema}})
-            return {"previous_value": previous_body}  # rollback restores the whole body
-        raise CmsWriteError(f"shopify adapter does not know field {field!r}")
+        previous_value = page.get(native) or ""
+        await self._request(client, "PUT", f"/pages/{page['id']}.json", {"page": {"id": page["id"], native: value}})
+        return {"previous_value": previous_value}
 
     async def _update_page(self, client: httpx.AsyncClient, page: dict, value: dict) -> dict:
         description_result = await self._set_description_metafield(client, page, value["meta_description"])
@@ -106,14 +137,19 @@ class ShopifyAdapter:
             raise CmsWriteError(f"no shopify page with handle {handle!r} (from {url})")
         return pages[0]
 
+    async def _description_metafield(self, client: httpx.AsyncClient, page: dict) -> dict | None:
+        """The page's global.description_tag metafield row, if any."""
+        existing = await self._request(client, "GET", f"/pages/{page['id']}/metafields.json?namespace=global&key=description_tag")
+        metafields = existing.get("metafields") or []
+        return metafields[0] if metafields else None
+
     async def _set_description_metafield(self, client: httpx.AsyncClient, page: dict, value: str) -> dict:
         """global.description_tag is Shopify's meta-description slot; read the
         existing metafield first so the previous value survives for revert."""
-        existing = await self._request(client, "GET", f"/pages/{page['id']}/metafields.json?namespace=global&key=description_tag")
-        metafields = existing.get("metafields") or []
-        if metafields:
-            previous_value = metafields[0].get("value")
-            await self._request(client, "PUT", f"/metafields/{metafields[0]['id']}.json", {"metafield": {"id": metafields[0]["id"], "value": value, "type": "single_line_text_field"}})
+        metafield = await self._description_metafield(client, page)
+        if metafield:
+            previous_value = metafield.get("value")
+            await self._request(client, "PUT", f"/metafields/{metafield['id']}.json", {"metafield": {"id": metafield["id"], "value": value, "type": "single_line_text_field"}})
         else:
             previous_value = None
             await self._request(client, "POST", f"/pages/{page['id']}/metafields.json", {"metafield": {"namespace": "global", "key": "description_tag", "value": value, "type": "single_line_text_field"}})

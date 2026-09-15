@@ -22,12 +22,14 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from adapters.agents.claude_agent import ClaudeAgent
 from constants.constants import MAX_FOOTPRINT_CITIES, US_STATE_ABBREVS
-from objects.approval_setting import PRESET_AUTO_TASKS, ApprovalSetting
+from objects.approval_setting import ApprovalSetting
 from objects.brand import FOOTPRINT_LOCAL, Brand
 from objects.brand_market import BrandMarket
+from objects.connection import Connection
 from objects.goal import Goal
 from objects.market import Market
 from objects.organization import Organization
+from objects.site import STATUS_CONNECTED, Site
 from objects.task import STATUS_DONE, Task
 from objects.user import User
 from schemas.onboarding_schemas import InterviewRequest, InterviewResponse, LaunchRequest, LaunchResponse, SignupRequest, SignupResponse
@@ -123,35 +125,21 @@ def _parse_cities(cities: list[str]) -> list[tuple[str, str]]:
 
 @router.post("/brands/{brand_id}/launch", response_model=LaunchResponse)
 async def launch(brand_id: str, request: LaunchRequest | None = None) -> LaunchResponse:
-    """Once per brand: record the goal and the approval preset (both chosen
-    after signup), create the client-contribution rows (#1/#7 — no queue job,
-    the daily chase nags them), and enqueue launch's own kickoff work (#3/#8 —
-    the research pair is the interview's, never launch's). 409 on a second
-    launch."""
     brand = await Brand.get(brand_id)
     if brand.onboarded_at is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="brand already launched")
-    approval_preset = request.approval_preset if request else None
-    if approval_preset is not None and approval_preset not in PRESET_AUTO_TASKS:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"approval_preset must be one of {sorted(PRESET_AUTO_TASKS)}")
+    request = request or LaunchRequest()  # an empty body means "no preferences", not a different path
 
-    if request and request.goal_metric and request.goal_target:
+    if request.goal_metric and request.goal_target:
         Database.session.add(Goal(brand_id=brand.id, metric=request.goal_metric, target=request.goal_target))
         await Database.session.flush()
-    if approval_preset is not None:
-        await ApprovalSetting.apply_preset(brand.id, approval_preset)
+    if request.approval_preset:
+        await ApprovalSetting.apply_preset(brand.id, request.approval_preset)
 
-    # bare rows, deliberately NOT create_task: these are completed by the
-    # CLIENT, never a worker — a queue job would dead-letter (no runner by
-    # these names). The row IS the mechanism: status queued = waiting on the
-    # client (the daily chase nags), done = delivered. Launch creates its OWN
-    # subset of the chase vocabulary — other producers (plan approval's
-    # collect_study_data) add theirs when the work actually calls for it.
-    # answer_sme_interview is skipped when the interview already happened —
-    # launch must never nag for what the wizard collected minutes earlier.
+    already_satisfied = await _client_tasks_already_satisfied(brand)
     client_tasks_created = []
     for client_task_name in ONBOARDING_CLIENT_TASKS:
-        if client_task_name == "answer_sme_interview" and brand.interview_raw:
+        if client_task_name in already_satisfied:
             continue
         Database.session.add(Task(brand_id=brand.id, name=client_task_name))
         client_tasks_created.append(client_task_name)
@@ -166,19 +154,29 @@ async def launch(brand_id: str, request: LaunchRequest | None = None) -> LaunchR
     # TODO(#7, config half): GA4 events + call-tracking config needs the Google
     #       adapter; until then only the client verification task row exists.
 
-    await Brand.update(brand.id, onboarded_at=datetime.now(), approval_preset=approval_preset or brand.approval_preset)
+    await Brand.update(brand.id, onboarded_at=datetime.now(), approval_preset=request.approval_preset or brand.approval_preset)
     return LaunchResponse.create({"brand_id": brand.id, "client_tasks": client_tasks_created, "queued_work": [work_name for work_name, _ in LAUNCH_WORK]})
+
+
+async def _client_tasks_already_satisfied(brand: Brand) -> set[str]:
+    """The onboarding client tasks the wizard's optional steps already
+    delivered. Each condition mirrors what closes the task later: the
+    interview answers, a connected site (the same test connect_site closes
+    grant_access on), and a connected GA4 property for conversion tracking.
+    upload_photos has no in-app path, so it is always created."""
+    satisfied: set[str] = set()
+    if brand.interview_raw:
+        satisfied.add("answer_sme_interview")
+    if await Site.by_brand(brand.id) is not None:
+        satisfied.add("grant_access")
+    ga4_connection = await Connection.get_for_brand_provider(brand.id, "ga4")
+    if ga4_connection is not None and ga4_connection.status == STATUS_CONNECTED:
+        satisfied.add("verify_conversion_tracking")
+    return satisfied
 
 
 @router.post("/brands/{brand_id}/interview", response_model=InterviewResponse)
 async def interview(brand_id: str, request: InterviewRequest) -> InterviewResponse:
-    """#2 — store the AM-conducted interview verbatim, extract the brand
-    context from it (agent, no tools), mark the answer_sme_interview client
-    task done so the chase stops nagging, and kick off the research pair —
-    the extraction is exactly what research_competitors and research_prompts
-    ground in, and firing them here (not at launch) is what puts real
-    competitors + questions on the wizard's review step. The response is the
-    extraction for the client to confirm."""
     brand = await Brand.get(brand_id)
 
     extraction_json = await ClaudeAgent().run_role(
@@ -206,6 +204,8 @@ async def interview(brand_id: str, request: InterviewRequest) -> InterviewRespon
         await Task.update_status(interview_task.id, STATUS_DONE)
 
     for work_name, work_queue in RESEARCH_WORK:
+        if await Task.first_queued(brand.id, work_name) is not None:
+            continue  # a repeat submit re-extracts the facts but never double-runs the research
         await create_task(brand_id=brand.id, name=work_name, queue=work_queue)
 
     return InterviewResponse.create({"brand_id": brand.id, **context})

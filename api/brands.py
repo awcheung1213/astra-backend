@@ -9,7 +9,7 @@ brand-in-path must belong to the caller's org."""
 
 from fastapi import APIRouter, HTTPException, status
 
-from objects.approval_setting import PRESET_AUTO_TASKS, ApprovalSetting
+from objects.approval_setting import ApprovalSetting
 from objects.brand import Brand
 from schemas.brand_schemas import ApprovalPresetRequest, ApprovalPresetResponse, BrandResponse, BrandUpdateRequest
 
@@ -62,8 +62,6 @@ async def set_approval_preset(brand_id: str, request: ApprovalPresetRequest) -> 
     always-approve floor is code (utils/approval_flow.py) — no preset ever
     auto-ships outward work."""
     brand = await Brand.get(brand_id)
-    if request.approval_preset not in PRESET_AUTO_TASKS:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"approval_preset must be one of {sorted(PRESET_AUTO_TASKS)}")
     auto_tasks = await ApprovalSetting.apply_preset(brand.id, request.approval_preset)
     await Brand.update(brand.id, approval_preset=request.approval_preset)
     return ApprovalPresetResponse.create({"brand_id": brand.id, "approval_preset": request.approval_preset, "auto_approved_tasks": auto_tasks})

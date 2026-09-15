@@ -1,79 +1,82 @@
-"""#9's two tiers: deterministic fix generators + the judgment tail.
+"""#9 — technical fixes: the site audit's fixable findings -> change_proposal
+artifacts behind the approval gate. Two modes, settings.TECHNICAL_FIX_MODE
+(agent-tools-plan.md Phase 2):
 
-technical_fix is tier 1 — $0 code: finding-kind -> generator -> a structured
-change_proposal artifact behind the approval gate (approval converts it to a
-change set; only the change-set engine ever touches the site). Whatever a
-generator can't derive mechanically escalates to technical_judgment, the
-Technical agent's tier — its proposals are prose (exact operations, expected
-effect, rollback path) written for a human first.
+- "generators" (default): the per-kind $0 code path — a fix map derives the
+  operation from the page; anything it can't derive escalates to
+  technical_judgment (the Technical agent's prose tail).
+- "agent": ONE Technical-agent run per audit over all the run's findings,
+  with CMS read tools. It proposes structured operations (propose_change) or
+  skips a finding with a reason the client can act on (skip_finding). No
+  prose proposals; SEO nuance rides the skills/seo playbooks, not code.
+
+Both modes emit the same artifact shape ({finding_id, kind, operations:
+[{field, url, value}]}), so the approval flow and the change-set engine never
+know which ran. Writes to client sites are never tools (rule 1): the agent
+proposes, a human or preset approves, only the change-set engine applies.
 
 No Pulse notifications here on purpose: a first audit can chain dozens of
 fixes at once; the approvals queue is the surface for pending proposals."""
 
 import json
 import re
+from datetime import datetime
+from urllib.parse import urlparse
 
+from sqlalchemy import select
+
+import settings
 from adapters.agents.claude_agent import ClaudeAgent
-from objects.artifact import STATUS_AUTO_APPROVED, Artifact
+from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, STATUS_PENDING_REVIEW, Artifact
 from objects.brand import FOOTPRINT_LOCAL, Brand
 from objects.finding import STATUS_OPEN, Finding
-from utils.agent_prompts import ROLE_TECHNICAL
+from objects.site import Site
+from utils.agent_prompts import ROLE_TECHNICAL, skills_for
 from utils.approval_flow import fan_out_approval, initial_artifact_status
-from utils.database import ReplicaDatabase
+from utils.database import Database, ReplicaDatabase
 from utils.logger import logger
-from utils.site_fetch import fetch_page_html
+from utils.site_fetch import fetch_page, fetch_page_html
 from utils.task_queue import create_task, task_lifecycle
 from worker.app import app
-from worker.tasks.site_audit import KIND_MISSING_H1, KIND_MISSING_META_DESCRIPTION, KIND_MISSING_SCHEMA, KIND_MISSING_TITLE
+from worker.tasks.changes import ADAPTER_BY_PLATFORM, native_field
+from worker.tasks.site_audit import KIND_MISSING_H1, KIND_MISSING_META_DESCRIPTION, KIND_MISSING_SCHEMA, KIND_MISSING_TITLE, page_facts, visible_text
+
+MODE_GENERATORS = "generators"
+MODE_AGENT = "agent"
+
+META_DESCRIPTION_MAX_CHARS = 155
+MIN_SOURCE_TEXT_CHARS = 40  # a page with less visible text than this can't describe itself
+PAGE_EXCERPT_CHARS = 4000  # how much page text rides a prompt / a fetch_url result
+# fields a proposal may name when no site is connected (no adapter to ask)
+GENERIC_FIELDS = ("title", "h1", "meta_description", "content")
 
 
 @app.task(name="technical_fix", queue="fixes", retry=2)
 async def technical_fix(task_id: str, brand_id: str) -> None:
-    """#9 tier 1 — fix generators: finding-kind -> fix map (schema, metas,
-    titles). CHAINED, never cron: produced by the site_audit runner, one per
-    new fixable finding (payload carries finding_id). Emits a structured
-    change_proposal artifact behind the approval gate; whatever no generator
-    can derive escalates to technical_judgment."""
+    """#9 — CHAINED, never cron: the site_audit runner emits ONE per audit
+    carrying that run's new fixable finding ids (payload.finding_ids; the
+    older single finding_id payload still works). Findings resolved or
+    dismissed since the audit are skipped — never a proposal for a non-issue."""
     async with task_lifecycle(task_id) as task:
-        finding_id = (task.payload or {}).get("finding_id", "")
-        finding = await _open_finding(finding_id)
-        if finding is None:
-            logger.info(f"[fixes] finding {finding_id}: gone or no longer open — nothing to fix")
+        findings = [finding for finding in [await _open_finding(finding_id) for finding_id in _finding_ids(task.payload)] if finding is not None]
+        if not findings:
+            logger.info(f"[fixes] task {task_id}: no open findings left — nothing to fix")
             return
         brand = await Brand.get(brand_id)
-        page_url = (finding.detail or {}).get("url", brand.website_url)
-
-        fix = await _generate_fix(finding, brand, page_url)
-        if fix is None:
-            # the judgment tail — nothing derivable mechanically for this one
-            await create_task(brand_id=brand_id, name="technical_judgment", queue="fixes", payload={"finding_id": finding.id})
-            logger.info(f"[fixes] finding {finding.id} ({finding.kind}): escalated to technical_judgment")
+        if settings.TECHNICAL_FIX_MODE == MODE_AGENT:
+            await _run_agent(task_id, brand, findings)
             return
-
-        # born auto_approved under Balanced/Hands-off — then it dispatches its
-        # change set right here, through the same fan-out a human click uses
-        artifact_status = await initial_artifact_status(brand.id, "technical_fix", "change_proposal")
-        artifact = await Artifact.create(
-            task_id=task_id,
-            brand_id=brand.id,
-            type="change_proposal",
-            content={"finding_id": finding.id, "kind": finding.kind, "operations": [{"field": fix["field"], "url": page_url, "value": fix["value"]}]},
-            evidence={"finding_summary": finding.summary, "derived_from": fix["derived_from"]},
-            status=artifact_status,
-        )
-        if artifact_status == STATUS_AUTO_APPROVED:
-            await fan_out_approval(artifact)
-            logger.info(f"[fixes] finding {finding.id} ({finding.kind}): change_proposal auto-approved by preset — dispatched")
-        else:
-            logger.info(f"[fixes] finding {finding.id} ({finding.kind}): change_proposal ready for review")
+        for finding in findings:
+            await _run_generator(task_id, brand, finding)
 
 
 @app.task(name="technical_judgment", queue="fixes", retry=2)
 async def technical_judgment(task_id: str, brand_id: str) -> None:
-    """#9's judgment tail — CHAINED from technical_fix when no generator can
-    derive the fix (payload carries finding_id). The Technical agent reads the
-    finding + the live page and proposes: exact operations, expected effect,
-    rollback path -> prose change_proposal artifact behind the approval gate."""
+    """Generators mode only — CHAINED from technical_fix when no generator
+    can derive the fix (payload carries finding_id). The Technical agent
+    reads the finding + the live page and proposes in prose: exact operations,
+    expected effect, rollback path. Agent mode never emits this: it proposes
+    structured operations or skips with a reason instead."""
     async with task_lifecycle(task_id) as task:
         finding_id = (task.payload or {}).get("finding_id", "")
         finding = await _open_finding(finding_id)
@@ -107,21 +110,317 @@ async def technical_judgment(task_id: str, brand_id: str) -> None:
         )
 
 
-META_DESCRIPTION_MAX_CHARS = 155
-MIN_SOURCE_TEXT_CHARS = 40  # a page with less visible text than this can't describe itself
-PAGE_EXCERPT_CHARS = 4000  # how much page text rides the judgment prompt
+def _finding_ids(payload: dict | None) -> list[str]:
+    payload = payload or {}
+    if payload.get("finding_ids"):
+        return list(payload["finding_ids"])
+    return [payload["finding_id"]] if payload.get("finding_id") else []
 
 
 ##############################
-# FIX GENERATORS (tier 1 — deterministic, $0)
+# SHARED: proposal birth (both modes)
 ##############################
+
+
+async def _create_proposal(task_id: str, brand: Brand, finding: Finding, operations: list[dict], evidence: dict) -> Artifact:
+    """One change_proposal per finding, born per the brand's preset — an
+    auto-approved one dispatches its change set right here, through the same
+    fan-out a human click uses."""
+    artifact_status = await initial_artifact_status(brand.id, "technical_fix", "change_proposal")
+    artifact = await Artifact.create(
+        task_id=task_id,
+        brand_id=brand.id,
+        type="change_proposal",
+        content={"finding_id": finding.id, "kind": finding.kind, "operations": operations},
+        evidence={"finding_summary": finding.summary, **evidence},
+        status=artifact_status,
+    )
+    if artifact_status == STATUS_AUTO_APPROVED:
+        await fan_out_approval(artifact)
+        logger.info(f"[fixes] finding {finding.id} ({finding.kind}): change_proposal auto-approved by preset — dispatched")
+    else:
+        logger.info(f"[fixes] finding {finding.id} ({finding.kind}): change_proposal ready for review")
+    return artifact
+
+
+async def _existing_proposal(brand_id: str, finding_id: str) -> Artifact | None:
+    """A live proposal already covering this finding (a retried run must not
+    put a second one in the queue)."""
+    live_statuses = (STATUS_PENDING_REVIEW, STATUS_APPROVED, STATUS_AUTO_APPROVED)
+    rows = await ReplicaDatabase.session.execute(select(Artifact).where(Artifact.brand_id == brand_id).where(Artifact.type == "change_proposal").where(Artifact.status.in_(live_statuses)).where(Artifact.content["finding_id"].astext == finding_id))  # type: ignore
+    return rows.scalars().first()
+
+
+async def _open_finding(finding_id: str) -> Finding | None:
+    """The task's finding, or None if it vanished or was resolved/dismissed
+    between the audit and this run."""
+    finding = await ReplicaDatabase.session.get(Finding, finding_id)
+    if finding is None or finding.status != STATUS_OPEN:
+        return None
+    return finding
+
+
+async def _site_adapter(brand_id: str):
+    """The connected site's adapter (its READ primitives are the agent's
+    eyes), or None when no site is connected or its platform has no adapter."""
+    site = await Site.by_brand(brand_id)
+    adapter_class = ADAPTER_BY_PLATFORM.get(site.platform) if site else None
+    return adapter_class(site) if adapter_class and site else None
+
+
+##############################
+# AGENT MODE — one run per audit
+##############################
+
+
+class TokenBudgetExceeded(Exception):
+    """The run's lifetime token budget (settings.TECHNICAL_FIX_TOKEN_BUDGET) is spent."""
+
+
+AGENT_TOOLS: list[dict] = [
+    {
+        "name": "fetch_url",
+        "description": "Fetch a URL on the brand's site the way a browser would. Returns status, content type, title, meta description, H1s, JSON-LD types and the visible text (truncated).",
+        "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    },
+    {
+        "name": "cms_get_page",
+        "description": "Read the CMS page behind a live URL with its current raw field values (the values a proposal will overwrite). Use before proposing any content change.",
+        "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    },
+    {
+        "name": "cms_get_settings",
+        "description": "Site-level CMS facts: site name, tagline, front-page mode, base URL.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "cms_list_pages",
+        "description": "The CMS's published pages (id, url, slug/handle, title) — to find a linking page or check whether a page exists.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "propose_change",
+        "description": "Propose the fix for ONE finding as concrete field writes. Each operation sets one writable field of one page on the brand's site to a full new value. Goes to the approval queue; nothing is applied here.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "finding_id": {"type": "string"},
+                "operations": {"type": "array", "items": {"type": "object", "properties": {"field": {"type": "string"}, "url": {"type": "string"}, "value": {}}, "required": ["field", "url", "value"]}},
+                "rationale": {"type": "string", "description": "One or two sentences a client would read: what changes and the expected effect."},
+            },
+            "required": ["finding_id", "operations", "rationale"],
+        },
+    },
+    {
+        "name": "skip_finding",
+        "description": "Record that a finding cannot be fixed by a page write and say exactly what the client or host must change instead.",
+        "input_schema": {"type": "object", "properties": {"finding_id": {"type": "string"}, "reason": {"type": "string"}}, "required": ["finding_id", "reason"]},
+    },
+]
+
+
+async def _run_agent(task_id: str, brand: Brand, findings: list[Finding]) -> None:
+    site = await Site.by_brand(brand.id)
+    adapter = await _site_adapter(brand.id)
+    platform = site.platform if site else None
+    run = _AgentRun(task_id, brand, findings, platform, adapter)
+
+    spent = 0
+
+    async def on_usage(usage) -> None:
+        nonlocal spent
+        spent += (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "output_tokens", 0) or 0)
+        if spent > settings.TECHNICAL_FIX_TOKEN_BUDGET:
+            raise TokenBudgetExceeded(f"{spent} tokens > budget {settings.TECHNICAL_FIX_TOKEN_BUDGET}")
+
+    try:
+        await ClaudeAgent().run_role(
+            ROLE_TECHNICAL,
+            prompt=_agent_prompt(brand, findings, platform, adapter),
+            tools=AGENT_TOOLS,
+            handlers=run.handlers(),
+            operation="technical_fix",
+            organization_id=brand.organization_id,
+            brand_id=brand.id,
+            task_id=task_id,
+            on_usage=on_usage,
+        )
+    except TokenBudgetExceeded as exc:
+        # proposals already made are kept; the rest wait for the next audit
+        logger.warning(f"[fixes] brand {brand.id}: agent run stopped — {exc}")
+    unhandled = [finding.id for finding in findings if finding.id not in run.handled]
+    logger.info(f"[fixes] brand {brand.id}: agent run — {len(run.proposed)} proposed, {len(run.skipped)} skipped, {len(unhandled)} unhandled, {spent} tokens")
+
+
+class _AgentRun:
+    """The tool handlers for one run — closures over the run's findings so
+    the agent can only act on what it was given, exactly once each."""
+
+    def __init__(self, task_id: str, brand: Brand, findings: list[Finding], platform: str | None, adapter) -> None:
+        self.task_id, self.brand, self.platform, self.adapter = task_id, brand, platform, adapter
+        self.findings_by_id = {finding.id: finding for finding in findings}
+        self.proposed: set[str] = set()
+        self.skipped: set[str] = set()
+
+    @property
+    def handled(self) -> set[str]:
+        return self.proposed | self.skipped
+
+    def handlers(self) -> dict:
+        return {"fetch_url": self.fetch_url, "cms_get_page": self.cms_get_page, "cms_get_settings": self.cms_get_settings, "cms_list_pages": self.cms_list_pages, "propose_change": self.propose_change, "skip_finding": self.skip_finding}
+
+    async def fetch_url(self, tool_input: dict) -> str:
+        url = tool_input["url"]
+        if not same_site(url, self.brand.website_url):
+            raise ValueError(f"{url} is not on the brand's site")
+        response = await fetch_page(url)
+        if response is None:
+            return json.dumps({"url": url, "status": "unreachable"})
+        html = response.text if "html" in response.headers.get("content-type", "") else ""
+        facts = page_facts(html, elapsed_seconds=0.0) if html else {}
+        return json.dumps({"url": url, "status": response.status_code, "content_type": response.headers.get("content-type", ""), **facts, "text": visible_text(html)[:PAGE_EXCERPT_CHARS]})
+
+    async def cms_get_page(self, tool_input: dict) -> str:
+        return json.dumps(await self._adapter().get_page(tool_input["url"]))
+
+    async def cms_get_settings(self, tool_input: dict) -> str:
+        return json.dumps(await self._adapter().get_settings())
+
+    async def cms_list_pages(self, tool_input: dict) -> str:
+        return json.dumps(await self._adapter().list_pages())
+
+    async def propose_change(self, tool_input: dict) -> str:
+        finding = self._finding(tool_input.get("finding_id", ""))
+        errors = validate_operations(self.platform, self.brand.website_url, tool_input.get("operations") or [])
+        if errors:
+            raise ValueError("; ".join(errors))
+        existing = await _existing_proposal(self.brand.id, finding.id)
+        if existing is not None:
+            self.proposed.add(finding.id)
+            return json.dumps({"artifact_id": existing.id, "status": existing.status, "note": "a proposal for this finding already exists"})
+        operations = [{"field": operation["field"], "url": operation["url"], "value": operation["value"]} for operation in tool_input["operations"]]
+        artifact = await _create_proposal(self.task_id, self.brand, finding, operations, evidence={"rationale": tool_input.get("rationale", ""), "derived_from": "Technical agent"})
+        self.proposed.add(finding.id)
+        return json.dumps({"artifact_id": artifact.id, "status": artifact.status})
+
+    async def skip_finding(self, tool_input: dict) -> str:
+        finding = self._finding(tool_input.get("finding_id", ""))
+        row = await Database.session.get(Finding, finding.id)
+        if row is not None:
+            row.detail = {**(row.detail or {}), "skipped": {"reason": tool_input.get("reason", ""), "task_id": self.task_id, "at": datetime.now().isoformat()}}
+            Database.session.add(row)
+            await Database.session.flush()
+        self.skipped.add(finding.id)
+        return json.dumps({"finding_id": finding.id, "skipped": True})
+
+    def _finding(self, finding_id: str) -> Finding:
+        finding = self.findings_by_id.get(finding_id)
+        if finding is None:
+            raise ValueError(f"unknown finding {finding_id!r} — only this run's findings can be handled")
+        if finding_id in self.handled:
+            raise ValueError(f"finding {finding_id} was already handled in this run")
+        return finding
+
+    def _adapter(self):
+        if self.adapter is None:
+            raise ValueError("no site is connected — CMS tools are unavailable; use fetch_url or skip the finding")
+        return self.adapter
+
+
+def validate_operations(platform: str | None, website_url: str, operations: list[dict]) -> list[str]:
+    """Why a proposal is refused at PROPOSAL time (not apply time): empty,
+    off-site, or naming a field this CMS cannot write. Pure."""
+    errors: list[str] = []
+    if not operations:
+        return ["at least one operation is required"]
+    for index, operation in enumerate(operations):
+        field, url, value = operation.get("field"), operation.get("url"), operation.get("value")
+        if not field or not url or value in (None, ""):
+            errors.append(f"operation {index}: field, url and a non-empty value are required")
+            continue
+        if not same_site(url, website_url):
+            errors.append(f"operation {index}: {url} is not on the brand's site")
+        if platform is not None and native_field(platform, field) is None:
+            errors.append(f"operation {index}: {platform} has no writable field {field!r}")
+        if platform is None and field not in GENERIC_FIELDS:
+            errors.append(f"operation {index}: unknown field {field!r} (no site connected; use one of {', '.join(GENERIC_FIELDS)})")
+    return errors
+
+
+def same_site(url: str, website_url: str) -> bool:
+    return _host(url) == _host(website_url) and _host(url) != ""
+
+
+def _host(url: str) -> str:
+    return urlparse(url).netloc.lower().removeprefix("www.")
+
+
+def _agent_prompt(brand: Brand, findings: list[Finding], platform: str | None, adapter) -> str:
+    kinds = {finding.kind for finding in findings}
+    lines = [
+        "An automated site audit produced the findings below. Handle EVERY finding exactly once: either",
+        "propose_change with concrete field writes, or skip_finding with a reason the client can act on.",
+        "",
+        f"Brand: {brand.name} ({brand.website_url})",
+        f"Description: {brand.description or 'n/a'}",
+        f"Category: {brand.category or 'n/a'} · Footprint: {brand.footprint or 'n/a'}",
+    ]
+    if adapter is not None:
+        aliases = ", ".join(f"{alias} -> {native}" for alias, native in adapter.FIELD_ALIASES.items())
+        lines.append(f"Connected CMS: {platform}. Writable fields: {', '.join(adapter.NATIVE_FIELDS)} (aliases: {aliases}).")
+    else:
+        lines.append("No site is connected: CMS tools are unavailable; you may still fetch_url. Proposals may name title, h1, meta_description or content.")
+    lines += ["", "Findings:"]
+    for finding in findings:
+        detail = finding.detail or {}
+        lines.append(f"- id={finding.id} kind={finding.kind} url={detail.get('url', brand.website_url)}")
+        lines.append(f"  {finding.summary}")
+        facts = {key: value for key, value in detail.items() if key != "url"}
+        if facts:
+            lines.append(f"  facts: {json.dumps(facts)[:1500]}")
+    lines += [
+        "",
+        "How to work:",
+        "- Read before you write: cms_get_page gives the current raw field values a proposal overwrites; fetch_url gives the rendered page.",
+        "- A composite change (a JSON-LD block, a fixed link) is a full new value for the page's content field, composed from the current content you read.",
+        "- Group all of a finding's operations into ONE propose_change. Never propose for a finding you were not given.",
+        "- Copy in proposals is public and customer-facing: nothing internal, nothing the page does not support.",
+        "- Finish with two or three sentences summarising what you proposed and what you skipped.",
+    ]
+    playbooks = skills_for(platform, kinds)
+    if playbooks:
+        lines += ["", "Playbooks for this run:", "", playbooks]
+    return "\n".join(lines)
+
+
+##############################
+# GENERATORS MODE — per-kind $0 code (retired once agent mode is the default)
+##############################
+
+
+async def _run_generator(task_id: str, brand: Brand, finding: Finding) -> None:
+    page_url = (finding.detail or {}).get("url", brand.website_url)
+    fix = await _generate_fix(finding, brand, page_url)
+    if fix is None:
+        # the judgment tail — nothing derivable mechanically for this one
+        await create_task(brand_id=brand.id, name="technical_judgment", queue="fixes", payload={"finding_id": finding.id})
+        logger.info(f"[fixes] finding {finding.id} ({finding.kind}): escalated to technical_judgment")
+        return
+    await _create_proposal(task_id, brand, finding, [{"field": fix["field"], "url": page_url, "value": fix["value"]}], evidence={"derived_from": fix["derived_from"]})
 
 
 async def _generate_fix(finding: Finding, brand: Brand, page_url: str) -> dict | None:
     """kind -> proposed operation ({field, value, derived_from}), or None when
     nothing can be derived mechanically (the caller escalates to judgment)."""
     if finding.kind == KIND_MISSING_SCHEMA:
-        return {"field": "schema_markup", "value": _schema_markup(brand), "derived_from": "brand profile"}
+        # a JSON-LD block is a content write: read the current content through
+        # the connected site and append the block — no site, no proposal
+        adapter = await _site_adapter(brand.id)
+        if adapter is None:
+            return None
+        content_field = adapter.resolve_field("content")
+        current_content = (await adapter.get_page(page_url)).get(content_field) or ""
+        return {"field": content_field, "value": f'{current_content}\n<script type="application/ld+json">{json.dumps(_schema_markup(brand))}</script>', "derived_from": "brand profile, appended to the page content"}
 
     page_html = await fetch_page_html(page_url)
     if page_html is None:
@@ -146,21 +445,13 @@ async def _generate_fix(finding: Finding, brand: Brand, page_url: str) -> dict |
 
 
 def _schema_markup(brand: Brand) -> dict:
-    """LocalBusiness/Organization JSON-LD from the brand profile alone."""
-    # TODO(#9): enrich with NAP/hours via a business_facts helper once an
-    #       authoritative adapter lands — precedence GBP (#14's adapter) ->
-    #       CMS store settings -> interview-confirmed fields; omit fields with
-    #       no trusted source, never scrape them off the page.
+    """LocalBusiness/Organization JSON-LD from the brand profile alone (the
+    generators-mode heuristic; agent mode picks the type per skills/seo)."""
     business_type = "LocalBusiness" if brand.footprint == FOOTPRINT_LOCAL else "Organization"
     schema = {"@context": "https://schema.org", "@type": business_type, "name": brand.name, "url": brand.website_url}
     if brand.description:
         schema["description"] = brand.description
     return schema
-
-
-##############################
-# PAGE HELPERS
-##############################
 
 
 def _first_match_text(pattern: str, html: str) -> str | None:
@@ -172,12 +463,6 @@ def _first_match_text(pattern: str, html: str) -> str | None:
     return text or None
 
 
-def visible_text(html: str) -> str:
-    body = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.I | re.S)
-    body = re.sub(r"<[^>]+>", " ", body)
-    return re.sub(r"\s+", " ", body).strip()
-
-
 def _leading_page_text(html: str, max_chars: int) -> str | None:
     """The page's opening copy, cut at a word boundary — meta-description raw
     material. None when the page has too little text to describe itself."""
@@ -187,21 +472,6 @@ def _leading_page_text(html: str, max_chars: int) -> str | None:
     if len(text) <= max_chars:
         return text
     return text[:max_chars].rsplit(" ", 1)[0]
-
-
-##############################
-# JUDGMENT (tier 2 — Technical agent)
-##############################
-
-
-async def _open_finding(finding_id: str) -> Finding | None:
-    """The task's finding, or None if it vanished or was resolved/dismissed
-    between the audit and this run — both tiers no-op instead of proposing a
-    fix for a non-issue."""
-    finding = await ReplicaDatabase.session.get(Finding, finding_id)
-    if finding is None or finding.status != STATUS_OPEN:
-        return None
-    return finding
 
 
 def _judgment_prompt(brand: Brand, finding: Finding, page_url: str, page_text: str) -> str:

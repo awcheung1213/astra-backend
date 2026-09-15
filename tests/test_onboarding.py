@@ -11,7 +11,11 @@ import json
 import uuid
 
 from adapters.agents.claude_agent import ClaudeAgent
+from adapters.cms.wordpress_adapter import WordPressAdapter
+from objects.connection import Connection
+from objects.site import STATUS_CONNECTED
 from tests._auth import release_runner
+from utils.database import Database, ReplicaDatabase
 
 EXTRACTION = {"description": "Sells nail polish online.", "category": "Beauty & cosmetics", "audience": "Online nail polish buyers", "differentiators": ["Natural ingredients"]}
 
@@ -121,3 +125,25 @@ async def test_competitor_add_rejects_the_own_brand(client):
     signup = await _signup(client, brand_name="Lippmann Collection")
     response = await client.post(f"/api/v1/brands/{signup['brand_id']}/competitors", json={"name": "Lippmann"})
     assert response.status_code == 422
+
+
+async def test_launch_skips_client_tasks_the_wizard_already_delivered(client, monkeypatch):
+    """Site connected and GA4 picked during the wizard: launch must not nag
+    for grant_access or verify_conversion_tracking; upload_photos still is."""
+    _stub_extraction(monkeypatch)
+
+    async def verify(self):
+        pass
+
+    monkeypatch.setattr(WordPressAdapter, "verify", verify)
+    brand_id = (await _signup(client))["brand_id"]
+    assert (await client.post(f"/api/v1/brands/{brand_id}/site", json={"platform": "wordpress", "credentials": {"base_url": "sunrisedental.example", "username": "evergreen", "app_password": "abcd efgh"}})).status_code == 200
+    async with ReplicaDatabase().connection(), Database().connection():
+        await Connection.upsert(brand_id, "ga4", STATUS_CONNECTED, credentials_encrypted=None)
+        await Database.session.commit()
+
+    body = (await client.post(f"/api/v1/brands/{brand_id}/launch")).json()
+    assert "grant_access" not in body["client_tasks"]
+    assert "verify_conversion_tracking" not in body["client_tasks"]
+    assert "upload_photos" in body["client_tasks"]
+    assert "answer_sme_interview" in body["client_tasks"]  # the interview was skipped, so it is still owed

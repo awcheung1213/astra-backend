@@ -144,19 +144,19 @@ async def tinker() -> None:
     #         row = await Task.first_queued(brand.id, "site_audit")
     # await site_audit.func(task_id=row.id, brand_id=brand.id)
 
-    # ---- step 7: technical_fix (#9) — chained from site_audit, one per finding   $0
-    # Output, one of two paths per finding:
-    #   a) mechanical fix:  artifacts INSERT type=change_proposal, content.operations=[{field,url,value}], evidence.derived_from,
-    #                       status=pending_review (review_everything) | auto_approved (balanced/hands_off)
-    #                       if auto_approved AND a connected site: change_sets INSERT 1 + tasks INSERT change_set_apply payload={"change_set_id"} + job
-    #   b) needs judgment:  tasks INSERT technical_judgment, payload={"finding_id"} + job
-    async with ReplicaDatabase().connection():
-        async with Database().connection():
-            brand = (await Database.session.execute(select(Brand).where(Brand.name == TEST_BRAND_NAME))).scalars().first()
-            rows = await Task.for_brand(brand.id, statuses=["queued"])
-            fix_rows = [row for row in rows if row.name == "technical_fix"]
-    for row in fix_rows:
-        await technical_fix.func(task_id=row.id, brand_id=brand.id)
+    # # ---- step 7: technical_fix (#9) — chained from site_audit, one per finding   $0
+    # # Output, one of two paths per finding:
+    # #   a) mechanical fix:  artifacts INSERT type=change_proposal, content.operations=[{field,url,value}], evidence.derived_from,
+    # #                       status=pending_review (review_everything) | auto_approved (balanced/hands_off)
+    # #                       if auto_approved AND a connected site: change_sets INSERT 1 + tasks INSERT change_set_apply payload={"change_set_id"} + job
+    # #   b) needs judgment:  tasks INSERT technical_judgment, payload={"finding_id"} + job
+    # async with ReplicaDatabase().connection():
+    #     async with Database().connection():
+    #         brand = (await Database.session.execute(select(Brand).where(Brand.name == TEST_BRAND_NAME))).scalars().first()
+    #         rows = await Task.for_brand(brand.id, statuses=["queued"])
+    #         fix_rows = [row for row in rows if row.name == "technical_fix"]
+    # for row in fix_rows:
+    #     await technical_fix.func(task_id=row.id, brand_id=brand.id)
 
     # # ---- step 8: technical_judgment (#9) — chained from technical_fix ---   $
     # # Output:
@@ -169,6 +169,46 @@ async def tinker() -> None:
     #         judgment_rows = [row for row in rows if row.name == "technical_judgment"]
     # for row in judgment_rows:
     #     await technical_judgment.func(task_id=row.id, brand_id=brand.id)
+
+    # # ---- step 29: approve a change_proposal or draft (#9 #11) ------------
+    # # Output:
+    # #   artifacts           UPDATE status=approved
+    # #   if Site.by_brand(brand) is CONNECTED and platform in APPLY_ENABLED_PLATFORMS:
+    # #       change_sets     INSERT 1 row: artifact_id, site_id, operations, status=pending
+    # #       tasks           INSERT change_set_apply payload={"change_set_id"} + job
+    # #   else                nothing else — queued_work=[]  (seed's site is pending: this is the path you'll see)
+    # async with ReplicaDatabase().connection():
+    #     async with Database().connection():
+    #         brand = (await Database.session.execute(select(Brand).where(Brand.name == TEST_BRAND_NAME))).scalars().first()
+    #         proposal = await Artifact.latest(brand.id, type="change_proposal", statuses=["pending_review"])
+    #         verdict = await review_artifact(proposal.id, ReviewRequest(decision="approve", reviewed_by="tinker"))
+    #         await Database.session.commit()
+    # print(f"29. change_proposal approved -> queued_work={verdict.queued_work}")
+
+    # ---- step 30: change_set_apply — the ONLY thing that touches the client's site   $0
+    # Output:
+    #   change_sets         UPDATE status=applying; per op UPDATE completed + rollback record (resumable); UPDATE status=applied, applied_at
+    #   client site         WordPress / Shopify write via adapters/cms — meta, schema, content, publish
+    #   notifications       INSERT 1 row: "Approved changes were applied to your site"
+    #   (never live-tested; needs step 37 first)
+    async with ReplicaDatabase().connection():
+        async with Database().connection():
+            brand = (await Database.session.execute(select(Brand).where(Brand.name == TEST_BRAND_NAME))).scalars().first()
+            row = await Task.first_queued(brand.id, "change_set_apply")
+    await change_set_apply.func(task_id=row.id, brand_id=brand.id)
+
+    # # ---- step 31: revert a change set ------------------------------------
+    # # Output:
+    # #   change_sets         INSERT 1 row: inverse operations, same artifact_id (a revert IS a new change set)
+    # #   tasks               INSERT change_set_apply payload={"change_set_id": <revert set>} + job
+    # #   change_sets         UPDATE original: reverted_by_change_set_id
+    # #   409 unless applied and unreverted · 422 if an op has no rollback record
+    # async with ReplicaDatabase().connection():
+    #     async with Database().connection():
+    #         change_set_id = "64b92753-49b2-448d-82b2-1b8aa4738a1a"
+    #         reverted = await revert_change_set(change_set_id)
+    #         await Database.session.commit()
+    # print(f"31. revert -> {reverted.revert_change_set_id} queued_work={reverted.queued_work}")
 
 if __name__ == "__main__":
     asyncio.run(tinker())

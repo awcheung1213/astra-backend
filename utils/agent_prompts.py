@@ -23,6 +23,9 @@ Usage (from a worker task runner):
     )
 """
 
+from functools import lru_cache
+from pathlib import Path
+
 ROLE_TECHNICAL = "technical"
 ROLE_CONTENT = "content"
 ROLE_OUTREACH_SCOUT = "outreach_scout"
@@ -139,6 +142,56 @@ _PROMPTS_BY_ROLE = {
     ROLE_STRATEGIST: _STRATEGIST,
     ROLE_ACCOUNT_MANAGER: _ACCOUNT_MANAGER,
 }
+
+
+##############################
+# SKILLS (per-situation playbooks — skills/seo/*.md)
+##############################
+
+SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills" / "seo"
+_SKILL_MATCH_ANY = "any"
+
+
+def skills_for(platform: str | None, kinds: set[str] | list[str], skills_dir: Path = SKILLS_DIR) -> str:
+    """The playbook bodies relevant to this run, joined for the TASK prompt
+    (never the cached system prompt). A file is included when its
+    `platforms:` covers the brand's CMS (or `any`) and its `kinds:` overlaps
+    the run's finding kinds (or `any`). Empty string when nothing matches."""
+    wanted_kinds = set(kinds)
+    selected = []
+    for skill in _load_skills(skills_dir):
+        platform_ok = _SKILL_MATCH_ANY in skill["platforms"] or (platform or "") in skill["platforms"]
+        kinds_ok = _SKILL_MATCH_ANY in skill["kinds"] or bool(skill["kinds"] & wanted_kinds)
+        if platform_ok and kinds_ok:
+            selected.append(skill["body"])
+    return "\n\n".join(selected)
+
+
+@lru_cache(maxsize=4)
+def _load_skills(skills_dir: Path) -> tuple[dict, ...]:
+    """Parsed once per process: (platforms, kinds, body) per file with front matter."""
+    skills = []
+    for path in sorted(skills_dir.glob("*.md")):
+        front_matter, body = _split_front_matter(path.read_text())
+        if front_matter is None:
+            continue  # README and anything without front matter
+        skills.append({"platforms": _csv_set(front_matter.get("platforms", "")), "kinds": _csv_set(front_matter.get("kinds", "")), "body": body.strip()})
+    return tuple(skills)
+
+
+def _split_front_matter(text: str) -> tuple[dict[str, str] | None, str]:
+    if not text.startswith("---"):
+        return None, text
+    _, front, body = text.split("---", 2)
+    fields = {}
+    for line in front.strip().splitlines():
+        key, _, value = line.partition(":")
+        fields[key.strip()] = value.strip()
+    return fields, body
+
+
+def _csv_set(value: str) -> set[str]:
+    return {item.strip() for item in value.split(",") if item.strip()}
 
 
 def system_prompt_for(role: str) -> str:

@@ -2,9 +2,12 @@
 
 Deterministic tier-1 code only — no LLM, $0. The rule engine's output is the
 findings table (open -> fixed | dismissed):
-- NEW actionable findings chain a technical_fix task each (#9 — this is the
-  producer the schedules file points at); the fix generators consume them and
-  escalate odd cases to the Technical agent.
+- NEW fixable findings chain ONE technical_fix task per audit carrying their
+  ids (#9 — this is the producer the schedules file points at); that task
+  proposes fixes (generators or the Technical agent, per
+  settings.TECHNICAL_FIX_MODE). Every finding also carries the page FACTS the
+  crawler saw (title, metas, H1s, JSON-LD types, timing) so the fixer reads
+  what the audit read instead of re-crawling.
 - Open audit-managed findings that are NO LONGER detected auto-resolve
   (status fixed) — re-running the audit is idempotent, not additive.
 
@@ -14,6 +17,7 @@ why not httpx) rather than an adapter — move it behind a crawler adapter when
 rate limits or metering ever matter. The checks are pure functions over
 fetched text (see tests/test_site_audit.py)."""
 
+import json
 import re
 import time
 from urllib.parse import urljoin, urlparse
@@ -34,7 +38,7 @@ from worker.app import app
 async def site_audit(task_id: str, brand_id: str) -> None:
     """#3 (ongoing) — crawl + audit rule engine over the brand's connected
     site -> typed findings. Fires at onboarding (site connect) and weekly via
-    schedule_site_audits. Chains #9: each NEW actionable finding emits a
+    schedule_site_audits. Chains #9: the run's NEW fixable findings ride ONE
     technical_fix task (inside run_site_audit). Idempotent: re-detected
     findings dedupe, vanished ones auto-resolve — retries are safe."""
     async with task_lifecycle(task_id):
@@ -144,28 +148,93 @@ def _finding(kind: str, severity: str, summary: str, url: str, **extra_detail) -
     return {"kind": kind, "severity": severity, "summary": summary, "detail": {"url": url, **extra_detail}}
 
 
-def page_findings(url: str, html: str, elapsed_seconds: float) -> list[dict]:
-    """Deterministic per-page checks -> finding dicts (kind, severity, summary, detail)."""
+def page_facts(html: str, elapsed_seconds: float) -> dict:
+    """What the crawler SAW on a page — the shared vocabulary between the rule
+    engine (which turns absences into findings) and the fixer (which reads
+    these off the finding instead of re-crawling). Pure."""
     title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
-    has_title = bool(title_match and title_match.group(1).strip())
     # meta attributes appear in either order: name-then-content or content-then-name
-    has_meta_description = bool(re.search(r"<meta[^>]+name=[\"']description[\"'][^>]+content=[\"'][^\"']+[\"']", html, re.I) or re.search(r"<meta[^>]+content=[\"'][^\"']+[\"'][^>]+name=[\"']description[\"']", html, re.I))
-    has_h1 = bool(re.search(r"<h1[\s>]", html, re.I))
-    has_schema_markup = bool(re.search(r"<script[^>]+application/ld\+json", html, re.I))
+    meta_match = re.search(r"<meta[^>]+name=[\"']description[\"'][^>]+content=[\"']([^\"']*)[\"']", html, re.I) or re.search(r"<meta[^>]+content=[\"']([^\"']*)[\"'][^>]+name=[\"']description[\"']", html, re.I)
+    h1s = [_strip_tags(match) for match in re.findall(r"<h1[^>]*>(.*?)</h1>", html, re.I | re.S)]
+    ld_json_blocks = re.findall(r"<script[^>]+application/ld\+json[^>]*>(.*?)</script>", html, re.I | re.S)
+    return {
+        "title": _strip_tags(title_match.group(1)) if title_match else "",
+        "meta_description": (meta_match.group(1) or "").strip() if meta_match else "",
+        "h1s": [heading for heading in h1s if heading],
+        "ld_json_types": _ld_json_types(ld_json_blocks),
+        "word_count": len(visible_text(html).split()),
+        "seo_plugin": seo_plugin(html),
+        "elapsed_seconds": round(elapsed_seconds, 2),
+    }
+
+
+# markers the common WordPress SEO plugins leave in the rendered head — the
+# fixer needs this because core WordPress has no meta-description field: an
+# excerpt only becomes <meta name="description"> when one of these renders it
+SEO_PLUGIN_MARKERS = (("yoast", "yoast"), ("rank math", "rank_math"), ("rank-math", "rank_math"), ("aioseo", "aioseo"), ("all in one seo", "aioseo"), ("seopress", "seopress"), ("the seo framework", "seo_framework"))
+
+
+def seo_plugin(html: str) -> str | None:
+    """Which SEO plugin rendered this page, by its head markers; None when none."""
+    head = html[:20000].lower()
+    for marker, name in SEO_PLUGIN_MARKERS:
+        if marker in head:
+            return name
+    return None
+
+
+def page_findings(url: str, html: str, elapsed_seconds: float) -> list[dict]:
+    """Deterministic per-page checks -> finding dicts (kind, severity, summary,
+    detail); every detail carries the page's facts."""
+    facts = page_facts(html, elapsed_seconds)
     is_slow = elapsed_seconds > SLOW_PAGE_SECONDS
 
     findings: list[dict] = []
-    if not has_title:
-        findings.append(_finding(KIND_MISSING_TITLE, SEVERITY_WARN, f"Page has no <title>: {url}", url))
-    if not has_meta_description:
-        findings.append(_finding(KIND_MISSING_META_DESCRIPTION, SEVERITY_WARN, f"Page has no meta description: {url}", url))
-    if not has_h1:
-        findings.append(_finding(KIND_MISSING_H1, SEVERITY_WARN, f"Page has no <h1>: {url}", url))
-    if not has_schema_markup:
-        findings.append(_finding(KIND_MISSING_SCHEMA, SEVERITY_WARN, f"Page has no structured data (ld+json): {url}", url))
+    if not facts["title"]:
+        findings.append(_finding(KIND_MISSING_TITLE, SEVERITY_WARN, f"Page has no <title>: {url}", url, facts=facts))
+    if not facts["meta_description"]:
+        findings.append(_finding(KIND_MISSING_META_DESCRIPTION, SEVERITY_WARN, f"Page has no meta description: {url}", url, facts=facts))
+    if not facts["h1s"]:
+        findings.append(_finding(KIND_MISSING_H1, SEVERITY_WARN, f"Page has no <h1>: {url}", url, facts=facts))
+    if not ld_json_blocks_present(html):
+        findings.append(_finding(KIND_MISSING_SCHEMA, SEVERITY_WARN, f"Page has no structured data (ld+json): {url}", url, facts=facts))
     if is_slow:
-        findings.append(_finding(KIND_SLOW_PAGE, SEVERITY_SERIOUS, f"Page took {elapsed_seconds:.1f}s to respond: {url}", url, elapsed_seconds=round(elapsed_seconds, 2)))
+        findings.append(_finding(KIND_SLOW_PAGE, SEVERITY_SERIOUS, f"Page took {elapsed_seconds:.1f}s to respond: {url}", url, elapsed_seconds=round(elapsed_seconds, 2), facts=facts))
     return findings
+
+
+def ld_json_blocks_present(html: str) -> bool:
+    return bool(re.search(r"<script[^>]+application/ld\+json", html, re.I))
+
+
+def visible_text(html: str) -> str:
+    """The page's readable text: scripts/styles and tags stripped, whitespace collapsed."""
+    body = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.I | re.S)
+    return _strip_tags(body)
+
+
+def _strip_tags(fragment: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", fragment)).strip()
+
+
+def _ld_json_types(blocks: list[str]) -> list[str]:
+    """The @type values declared across a page's JSON-LD blocks (graphs included)."""
+    types: list[str] = []
+    for block in blocks:
+        try:
+            data = json.loads(block)
+        except ValueError:
+            continue
+        nodes = data if isinstance(data, list) else [data]
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            for item in [node] + [graph_node for graph_node in node.get("@graph", []) if isinstance(graph_node, dict)]:
+                declared = item.get("@type")
+                for type_name in declared if isinstance(declared, list) else [declared]:
+                    if isinstance(type_name, str) and type_name not in types:
+                        types.append(type_name)
+    return types
 
 
 def extract_internal_links(base_url: str, html: str) -> list[str]:
@@ -206,7 +275,7 @@ async def _crawl(base_url: str) -> list[dict]:
         sitemap_url = urljoin(base_url, "/sitemap.xml")
         checked_sitemap_urls = sitemap_candidate_urls(base_url, robots_txt)
         if not await _find_sitemap(client, checked_sitemap_urls):
-            findings.append(_finding(KIND_MISSING_SITEMAP, SEVERITY_WARN, "No sitemap found (robots.txt names none; none of the usual paths serve one)", sitemap_url, checked=checked_sitemap_urls))
+            findings.append(_finding(KIND_MISSING_SITEMAP, SEVERITY_WARN, f"No working sitemap found ({len(checked_sitemap_urls)} locations checked, including any robots.txt names)", sitemap_url, checked=checked_sitemap_urls))
 
         urls_to_visit = [base_url]
         visited_urls: set[str] = set()
@@ -251,11 +320,6 @@ async def _fetch_text(client: AsyncSession, url: str) -> str | None:
 
 
 async def run_site_audit(brand_id: str) -> dict:
-    """One brand's audit: crawl -> diff against open findings -> chain fixes.
-
-    Returns counts for the runner's log line. Idempotent: re-detected findings
-    are kept (not duplicated), vanished ones auto-resolve, and technical_fix
-    tasks chain only off NEWLY created findings."""
     brand = await Brand.get(brand_id)
     site = await Site.by_brand(brand_id)
 
@@ -266,6 +330,7 @@ async def run_site_audit(brand_id: str) -> dict:
     detected_finding_keys = {finding_key(detected["kind"], detected["detail"]) for detected in detected_findings}
 
     created_count = 0
+    new_fixable_finding_ids: list[str] = []
     for detected in detected_findings:
         already_open = finding_key(detected["kind"], detected["detail"]) in open_finding_by_key
         if already_open:
@@ -273,8 +338,12 @@ async def run_site_audit(brand_id: str) -> dict:
         finding = await Finding.create(brand_id=brand_id, site_id=site.id if site else None, kind=detected["kind"], severity=detected["severity"], summary=detected["summary"], detail=detected["detail"])
         created_count += 1
         if detected["kind"] in FIXABLE_KINDS:
-            # #9 — the chained producer the schedules file points at
-            await create_task(brand_id=brand_id, name="technical_fix", queue="fixes", payload={"finding_id": finding.id})
+            new_fixable_finding_ids.append(finding.id)
+    if new_fixable_finding_ids:
+        # #9 — the chained producer the schedules file points at: ONE task per
+        # audit so agent mode reads the whole run at once (generators mode
+        # loops the same ids)
+        await create_task(brand_id=brand_id, name="technical_fix", queue="fixes", payload={"finding_ids": new_fixable_finding_ids})
 
     resolved_count = 0
     for key, open_finding in open_finding_by_key.items():

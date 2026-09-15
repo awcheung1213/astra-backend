@@ -1,6 +1,19 @@
-from pydantic import ConfigDict
+from typing import Annotated
 
+from pydantic import AfterValidator, ConfigDict
+
+from objects.approval_setting import PRESET_AUTO_TASKS
 from schemas.base_schemas import BaseRequest, BaseResponse
+
+
+def _known_preset(preset: str) -> str:
+    if preset not in PRESET_AUTO_TASKS:
+        raise ValueError(f"must be one of {sorted(PRESET_AUTO_TASKS)}")
+    return preset
+
+
+# a preset name checked at the request boundary — an unknown one 422s before any route runs
+ApprovalPreset = Annotated[str, AfterValidator(_known_preset)]
 
 
 class BrandUpdateRequest(BaseRequest):
@@ -35,7 +48,7 @@ class BrandResponse(BaseResponse):
 
 
 class ApprovalPresetRequest(BaseRequest):
-    approval_preset: str  # review_everything | balanced | hands_off
+    approval_preset: ApprovalPreset
 
 
 class ApprovalPresetResponse(BaseResponse):

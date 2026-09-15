@@ -187,6 +187,7 @@ async def run_submit_prompt_execution_batch() -> None:
                     )
 
     markets_by_id = {market.id: market for market in await Market.all()}
+    failed_engines: list[str] = []
 
     for engine_name in settings.ACTIVE_ENGINES:
         query_requests: list[QueryRequest] = []
@@ -207,7 +208,12 @@ async def run_submit_prompt_execution_batch() -> None:
         if not query_requests:
             continue
 
-        batch_handle = await initialize_adapter(adapter=f"{engine_name}_service").submit_batch(query_requests)
+        try:
+            batch_handle = await initialize_adapter(adapter=f"{engine_name}_service").submit_batch(query_requests)
+        except Exception as exc:
+            failed_engines.append(engine_name)
+            logger.error(f"[collection] submit_prompt_execution_batch - {engine_name}: submit failed for {len(query_requests)} requests: {type(exc).__name__}: {str(exc)[:300]}")
+            continue
         await Batch.create(
             provider=batch_handle.provider,
             batch_id=batch_handle.batch_id,
@@ -217,6 +223,9 @@ async def run_submit_prompt_execution_batch() -> None:
             kind=UsageKind.EXECUTE_PROMPTS,
         )
         await Database.session.commit()
+
+    if failed_engines and len(failed_engines) == len(settings.ACTIVE_ENGINES):
+        raise RuntimeError(f"submit_prompt_execution_batch: every engine failed to submit ({', '.join(failed_engines)})")
 
 
 async def _in_process_cells() -> dict[str, set[tuple[str, str]]]:
