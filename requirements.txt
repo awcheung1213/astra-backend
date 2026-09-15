@@ -4,6 +4,7 @@ asyncpg==0.31.0
 fastapi==0.141.1
 google-genai==2.6.0
 httpx==0.28.1
+curl_cffi==0.16.3
 openai==2.38.0
 pg8000==1.31.2
 procrastinate[psycopg]==3.9.0

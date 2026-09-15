@@ -1,6 +1,6 @@
 """Audit rule engine — pure functions over fetched text."""
 
-from worker.tasks.site_audit import KIND_MISSING_H1, KIND_MISSING_META_DESCRIPTION, KIND_MISSING_SCHEMA, KIND_MISSING_TITLE, KIND_SLOW_PAGE, extract_internal_links, finding_key, page_findings, robots_blocked_agents
+from worker.tasks.site_audit import KIND_MISSING_H1, KIND_MISSING_META_DESCRIPTION, KIND_MISSING_SCHEMA, KIND_MISSING_TITLE, KIND_SLOW_PAGE, extract_internal_links, finding_key, is_sitemap_document, page_findings, robots_blocked_agents, robots_sitemap_urls, sitemap_candidate_urls
 
 GOOD_HTML = """
 <html><head><title>Best Nail Salon</title>
@@ -56,3 +56,21 @@ def test_extract_internal_links_filters_and_dedupes():
 def test_finding_key_is_kind_plus_url():
     assert finding_key("missing_title", {"url": "https://x.com/a"}) == ("missing_title", "https://x.com/a")
     assert finding_key("missing_sitemap", {}) == ("missing_sitemap", "")
+
+
+def test_robots_sitemap_directives_are_collected_in_order():
+    robots = "User-agent: *\nDisallow:\nSitemap: https://x.com/sitemap_index.xml\n# Sitemap: https://x.com/ignored.xml\nsitemap: https://x.com/news.xml\nSitemap: https://x.com/sitemap_index.xml\nSitemap: /relative.xml\n"
+    assert robots_sitemap_urls(robots) == ["https://x.com/sitemap_index.xml", "https://x.com/news.xml"]
+
+
+def test_sitemap_candidates_prefer_robots_then_common_paths():
+    robots = "Sitemap: https://x.com/wp-sitemap.xml\n"
+    assert sitemap_candidate_urls("https://x.com/", robots) == ["https://x.com/wp-sitemap.xml", "https://x.com/sitemap.xml", "https://x.com/sitemap_index.xml"]
+    assert sitemap_candidate_urls("https://x.com/", None) == ["https://x.com/sitemap.xml", "https://x.com/sitemap_index.xml", "https://x.com/wp-sitemap.xml"]
+
+
+def test_sitemap_document_requires_sitemap_xml_not_just_a_200():
+    assert is_sitemap_document("application/xml", '<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://x.com/</loc></url></urlset>')
+    assert is_sitemap_document("text/xml; charset=UTF-8", "<sitemapindex><sitemap><loc>https://x.com/a.xml</loc></sitemap></sitemapindex>")
+    assert not is_sitemap_document("text/html; charset=UTF-8", "<html><body>Not found</body></html>")  # soft-404
+    assert not is_sitemap_document("application/xml", "<rss><channel></channel></rss>")

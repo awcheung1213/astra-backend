@@ -8,24 +8,25 @@ findings table (open -> fixed | dismissed):
 - Open audit-managed findings that are NO LONGER detected auto-resolve
   (status fixed) — re-running the audit is idempotent, not additive.
 
-Crawling the client's PUBLIC site is a free, credential-less read, so it uses
-httpx directly rather than an adapter — move it behind a crawler adapter when
+Crawling the client's PUBLIC site is a free, credential-less read, so it goes
+through utils/site_fetch (browser-fingerprinted curl_cffi — see that module for
+why not httpx) rather than an adapter — move it behind a crawler adapter when
 rate limits or metering ever matter. The checks are pure functions over
 fetched text (see tests/test_site_audit.py)."""
-
 
 import re
 import time
 from urllib.parse import urljoin, urlparse
 
-import httpx
+from curl_cffi.requests import AsyncSession
 
 from objects.brand import Brand
 from objects.finding import SEVERITY_SERIOUS, SEVERITY_WARN, Finding
 from objects.site import Site
 from utils.logger import logger
-from utils.task_queue import create_task
-from utils.task_queue import task_lifecycle
+from utils.site_fetch import fetch as _fetch
+from utils.site_fetch import site_session
+from utils.task_queue import create_task, task_lifecycle
 from worker.app import app
 
 
@@ -47,6 +48,10 @@ SLOW_PAGE_SECONDS = 3.0
 # the crawlers whose access decides AI visibility — blocking them is the
 # single most self-defeating thing a client site can do
 AI_CRAWLERS = ("GPTBot", "ClaudeBot", "Google-Extended", "PerplexityBot")
+
+# where a sitemap lives when robots.txt doesn't say: the classic path, then the
+# Yoast/Rank Math index, then WordPress core's built-in (5.5+) sitemap
+DEFAULT_SITEMAP_PATHS = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")
 
 KIND_BLOCKED_AI_CRAWLER = "blocked_ai_crawler"
 KIND_MISSING_SITEMAP = "missing_sitemap"
@@ -100,6 +105,39 @@ def robots_blocked_agents(robots_txt: str) -> list[str]:
         if any(rule == "/" for rule in crawler_rules):
             blocked_crawlers.append(crawler)
     return blocked_crawlers
+
+
+def robots_sitemap_urls(robots_txt: str) -> list[str]:
+    """Absolute URLs named by `Sitemap:` directives, in order, deduped. The
+    directive is section-independent, so every occurrence counts."""
+    sitemap_urls: list[str] = []
+    for raw_line in robots_txt.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if ":" not in line:
+            continue
+        directive, directive_value = (part.strip() for part in line.split(":", 1))
+        is_absolute_url = urlparse(directive_value).scheme in ("http", "https")
+        if directive.lower() == "sitemap" and is_absolute_url and directive_value not in sitemap_urls:
+            sitemap_urls.append(directive_value)
+    return sitemap_urls
+
+
+def sitemap_candidate_urls(base_url: str, robots_txt: str | None) -> list[str]:
+    """Where to look for a sitemap, most authoritative first: robots.txt's own
+    declaration(s), then the conventional paths. Deduped in order."""
+    candidates: list[str] = []
+    for url in robots_sitemap_urls(robots_txt or "") + [urljoin(base_url, path) for path in DEFAULT_SITEMAP_PATHS]:
+        if url not in candidates:
+            candidates.append(url)
+    return candidates
+
+
+def is_sitemap_document(content_type: str, body: str) -> bool:
+    """A 200 alone doesn't prove a sitemap — soft-404s and HTML fallbacks are
+    common — so require sitemap XML (a urlset or a sitemap index)."""
+    if "html" in content_type.lower():
+        return False
+    return bool(re.search(r"<(urlset|sitemapindex)[\s>]", body[:4096], re.I))
 
 
 def _finding(kind: str, severity: str, summary: str, url: str, **extra_detail) -> dict:
@@ -158,16 +196,17 @@ def finding_key(kind: str, detail: dict) -> tuple[str, str]:
 async def _crawl(base_url: str) -> list[dict]:
     """Fetch robots/sitemap/pages (capped) and run the rule engine."""
     findings: list[dict] = []
-    async with httpx.AsyncClient(follow_redirects=True, timeout=FETCH_TIMEOUT_SECONDS, headers={"User-Agent": "EvergreenAudit/1.0"}) as client:
+    async with site_session(timeout=FETCH_TIMEOUT_SECONDS) as client:
         robots_url = urljoin(base_url, "/robots.txt")
         robots_txt = await _fetch_text(client, robots_url)
         for blocked_crawler in robots_blocked_agents(robots_txt or ""):
             findings.append(_finding(KIND_BLOCKED_AI_CRAWLER, SEVERITY_SERIOUS, f"robots.txt blocks {blocked_crawler} — invisible to that AI engine", robots_url, crawler=blocked_crawler))
 
+        # keyed on the classic path so an existing open finding survives re-detection
         sitemap_url = urljoin(base_url, "/sitemap.xml")
-        sitemap_response = await _fetch(client, sitemap_url)
-        if sitemap_response is None or sitemap_response.status_code >= 400:
-            findings.append(_finding(KIND_MISSING_SITEMAP, SEVERITY_WARN, "No sitemap.xml", sitemap_url))
+        checked_sitemap_urls = sitemap_candidate_urls(base_url, robots_txt)
+        if not await _find_sitemap(client, checked_sitemap_urls):
+            findings.append(_finding(KIND_MISSING_SITEMAP, SEVERITY_WARN, "No sitemap found (robots.txt names none; none of the usual paths serve one)", sitemap_url, checked=checked_sitemap_urls))
 
         urls_to_visit = [base_url]
         visited_urls: set[str] = set()
@@ -195,14 +234,16 @@ async def _crawl(base_url: str) -> list[dict]:
     return findings
 
 
-async def _fetch(client: httpx.AsyncClient, url: str) -> httpx.Response | None:
-    try:
-        return await client.get(url)
-    except httpx.HTTPError:
-        return None
+async def _find_sitemap(client: AsyncSession, candidate_urls: list[str]) -> str | None:
+    """First candidate that actually serves sitemap XML, else None."""
+    for candidate_url in candidate_urls:
+        response = await _fetch(client, candidate_url)
+        if response is not None and response.status_code < 400 and is_sitemap_document(response.headers.get("content-type", ""), response.text):
+            return candidate_url
+    return None
 
 
-async def _fetch_text(client: httpx.AsyncClient, url: str) -> str | None:
+async def _fetch_text(client: AsyncSession, url: str) -> str | None:
     response = await _fetch(client, url)
     if response is None or response.status_code >= 400:
         return None

@@ -132,17 +132,43 @@ async def tinker() -> None:
     #         row = await Task.first_queued(brand.id, "plan_update")
     # await plan_update.func(task_id=row.id, brand_id=brand.id)
 
-    # ---- step 6: site_audit (#3) — chained from launch -----------------   $0
+    # # ---- step 6: site_audit (#3) — chained from launch -----------------   $0
+    # # Output:
+    # #   findings            INSERT 1 row per NEW detected issue (kind, severity, summary, detail.url); open ones kept, not duplicated
+    # #   findings            UPDATE resolved_at on audit-managed open findings no longer detected
+    # #   tasks               INSERT 1 row per actionable new finding: technical_fix, payload={"finding_id"}
+    # #   procrastinate_jobs  INSERT 1 row per technical_fix
+    # async with ReplicaDatabase().connection():
+    #     async with Database().connection():
+    #         brand = (await Database.session.execute(select(Brand).where(Brand.name == TEST_BRAND_NAME))).scalars().first()
+    #         row = await Task.first_queued(brand.id, "site_audit")
+    # await site_audit.func(task_id=row.id, brand_id=brand.id)
+
+    # # ---- step 7: technical_fix (#9) — chained from site_audit, one per finding   $0
+    # # Output, one of two paths per finding:
+    # #   a) mechanical fix:  artifacts INSERT type=change_proposal, content.operations=[{field,url,value}], evidence.derived_from,
+    # #                       status=pending_review (review_everything) | auto_approved (balanced/hands_off)
+    # #                       if auto_approved AND a connected site: change_sets INSERT 1 + tasks INSERT change_set_apply payload={"change_set_id"} + job
+    # #   b) needs judgment:  tasks INSERT technical_judgment, payload={"finding_id"} + job
+    # async with ReplicaDatabase().connection():
+    #     async with Database().connection():
+    #         brand = (await Database.session.execute(select(Brand).where(Brand.name == TEST_BRAND_NAME))).scalars().first()
+    #         rows = await Task.for_brand(brand.id, statuses=["queued"])
+    #         fix_rows = [row for row in rows if row.name == "technical_fix"]
+    # for row in fix_rows:
+    #     await technical_fix.func(task_id=row.id, brand_id=brand.id)
+
+    # ---- step 8: technical_judgment (#9) — chained from technical_fix ---   $
     # Output:
-    #   findings            INSERT 1 row per NEW detected issue (kind, severity, summary, detail.url); open ones kept, not duplicated
-    #   findings            UPDATE resolved_at on audit-managed open findings no longer detected
-    #   tasks               INSERT 1 row per actionable new finding: technical_fix, payload={"finding_id"}
-    #   procrastinate_jobs  INSERT 1 row per technical_fix
+    #   artifacts           INSERT 1 row: type=change_proposal, content.markdown proposal, status per preset (same dispatch rule as 7a)
+    #   cost_events         INSERT per agent turn
     async with ReplicaDatabase().connection():
         async with Database().connection():
             brand = (await Database.session.execute(select(Brand).where(Brand.name == TEST_BRAND_NAME))).scalars().first()
-            row = await Task.first_queued(brand.id, "site_audit")
-    await site_audit.func(task_id=row.id, brand_id=brand.id)
+            rows = await Task.for_brand(brand.id, statuses=["queued"])
+            judgment_rows = [row for row in rows if row.name == "technical_judgment"]
+    for row in judgment_rows:
+        await technical_judgment.func(task_id=row.id, brand_id=brand.id)
 
 if __name__ == "__main__":
     asyncio.run(tinker())

@@ -18,10 +18,12 @@ returns created_ref."""
 
 import json
 
-import httpx
+from curl_cffi.requests import AsyncSession
+from curl_cffi.requests.session import HttpMethod
 
 from adapters.cms.common import WRITE_TIMEOUT_SECONDS, CmsWriteError, markdown_to_html, path_slug
 from objects.site import Site
+from utils.site_fetch import RequestsError, site_session
 from utils.token_crypto import decrypt_credentials
 
 
@@ -35,11 +37,11 @@ class WordPressAdapter:
         """Cheap authed read proving base_url + credentials actually work.
         context=edit forces authentication — a public read would pass with a
         wrong password. Raises CmsWriteError on any failure."""
-        async with httpx.AsyncClient(auth=self.auth, timeout=WRITE_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        async with site_session(timeout=WRITE_TIMEOUT_SECONDS, auth=self.auth) as client:
             await self._request(client, "GET", "/wp-json/wp/v2/pages?per_page=1&context=edit")
 
     async def apply(self, operation: dict) -> dict:
-        async with httpx.AsyncClient(auth=self.auth, timeout=WRITE_TIMEOUT_SECONDS, follow_redirects=True) as client:
+        async with site_session(timeout=WRITE_TIMEOUT_SECONDS, auth=self.auth) as client:
             if operation["op"] == "publish_page":
                 return await self._publish_page(client, operation["value"])
             if operation["op"] == "unpublish_page":
@@ -56,7 +58,7 @@ class WordPressAdapter:
     # OPERATIONS
     ##############################
 
-    async def _set_field(self, client: httpx.AsyncClient, kind: str, page: dict, field: str, value) -> dict:
+    async def _set_field(self, client: AsyncSession, kind: str, page: dict, field: str, value) -> dict:
         if field in ("title", "h1"):
             previous_value = _raw(page.get("title"))
             await self._request(client, "POST", f"/wp-json/wp/v2/{kind}/{page['id']}", {"title": value})
@@ -72,16 +74,16 @@ class WordPressAdapter:
             return {"previous_value": previous_content}  # rollback restores the whole content
         raise CmsWriteError(f"wordpress adapter does not know field {field!r}")
 
-    async def _update_page(self, client: httpx.AsyncClient, kind: str, page: dict, value: dict) -> dict:
+    async def _update_page(self, client: AsyncSession, kind: str, page: dict, value: dict) -> dict:
         previous_value = {"title": _raw(page.get("title")), "meta_description": _raw(page.get("excerpt")), "body_markdown": _raw(page.get("content"))}
         await self._request(client, "POST", f"/wp-json/wp/v2/{kind}/{page['id']}", {"title": value["title"], "excerpt": value["meta_description"], "content": markdown_to_html(value["body_markdown"])})
         return {"previous_value": previous_value}
 
-    async def _publish_page(self, client: httpx.AsyncClient, value: dict) -> dict:
+    async def _publish_page(self, client: AsyncSession, value: dict) -> dict:
         created = await self._request(client, "POST", "/wp-json/wp/v2/pages", {"title": value["title"], "excerpt": value["meta_description"], "content": markdown_to_html(value["body_markdown"]), "status": "publish"})
         return {"previous_value": None, "created_ref": str(created["id"])}
 
-    async def _unpublish_page(self, client: httpx.AsyncClient, created_ref: str) -> dict:
+    async def _unpublish_page(self, client: AsyncSession, created_ref: str) -> dict:
         page = await self._request(client, "GET", f"/wp-json/wp/v2/pages/{created_ref}?context=edit")
         await self._request(client, "POST", f"/wp-json/wp/v2/pages/{created_ref}", {"status": "draft"})
         return {"previous_value": page.get("status")}
@@ -90,7 +92,7 @@ class WordPressAdapter:
     # PLUMBING
     ##############################
 
-    async def _page_for_url(self, client: httpx.AsyncClient, url: str) -> tuple[str, dict]:
+    async def _page_for_url(self, client: AsyncSession, url: str) -> tuple[str, dict]:
         """Resolve a live URL to its WP object: pages first, posts as fallback.
         context=edit returns RAW field values — what reads/writes round-trip on."""
         slug = path_slug(url)
@@ -100,10 +102,10 @@ class WordPressAdapter:
                 return kind, matches[0]
         raise CmsWriteError(f"no wordpress page or post with slug {slug!r} (from {url})")
 
-    async def _request(self, client: httpx.AsyncClient, method: str, path: str, json_body: dict | None = None):
+    async def _request(self, client: AsyncSession, method: HttpMethod, path: str, json_body: dict | None = None):
         try:
             response = await client.request(method, f"{self.base_url}{path}", json=json_body)
-        except httpx.HTTPError as error:
+        except RequestsError as error:
             raise CmsWriteError(f"wordpress {method} {path} failed: {error}") from error
         if response.status_code >= 400:
             raise CmsWriteError(f"wordpress {method} {path} -> {response.status_code}: {response.text[:200]}")

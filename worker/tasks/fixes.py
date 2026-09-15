@@ -13,8 +13,6 @@ fixes at once; the approvals queue is the surface for pending proposals."""
 import json
 import re
 
-import httpx
-
 from adapters.agents.claude_agent import ClaudeAgent
 from objects.artifact import STATUS_AUTO_APPROVED, Artifact
 from objects.brand import FOOTPRINT_LOCAL, Brand
@@ -23,9 +21,10 @@ from utils.agent_prompts import ROLE_TECHNICAL
 from utils.approval_flow import fan_out_approval, initial_artifact_status
 from utils.database import ReplicaDatabase
 from utils.logger import logger
+from utils.site_fetch import fetch_page_html
 from utils.task_queue import create_task, task_lifecycle
 from worker.app import app
-from worker.tasks.site_audit import FETCH_TIMEOUT_SECONDS, KIND_MISSING_H1, KIND_MISSING_META_DESCRIPTION, KIND_MISSING_SCHEMA, KIND_MISSING_TITLE
+from worker.tasks.site_audit import KIND_MISSING_H1, KIND_MISSING_META_DESCRIPTION, KIND_MISSING_SCHEMA, KIND_MISSING_TITLE
 
 
 @app.task(name="technical_fix", queue="fixes", retry=2)
@@ -162,17 +161,6 @@ def _schema_markup(brand: Brand) -> dict:
 ##############################
 # PAGE HELPERS
 ##############################
-
-
-async def fetch_page_html(url: str) -> str | None:
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=FETCH_TIMEOUT_SECONDS, headers={"User-Agent": "EvergreenAudit/1.0"}) as client:
-            response = await client.get(url)
-    except httpx.HTTPError:
-        return None
-    if response.status_code >= 400:
-        return None
-    return response.text
 
 
 def _first_match_text(pattern: str, html: str) -> str | None:

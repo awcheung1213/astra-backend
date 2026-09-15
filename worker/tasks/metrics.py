@@ -1,6 +1,5 @@
 from datetime import date, datetime, timedelta
 
-import httpx
 from sqlalchemy import select
 
 from adapters.google_adapter import GoogleAdapter
@@ -12,6 +11,7 @@ from objects.notification import KIND_ALERT, URGENCY_URGENT, Notification
 from objects.task import Task
 from utils.database import ReplicaDatabase
 from utils.logger import logger
+from utils.site_fetch import fetch_page
 from utils.task_queue import create_task, task_lifecycle
 from worker.app import app
 
@@ -133,12 +133,8 @@ async def _check_site_reachability(brand: Brand) -> None:
 
 
 async def _site_is_reachable(url: str) -> bool:
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=SITE_CHECK_TIMEOUT_SECONDS, headers={"User-Agent": "EvergreenMonitor/1.0"}) as client:
-            response = await client.get(url)
-    except httpx.HTTPError:
-        return False
-    return response.status_code < 500
+    response = await fetch_page(url, timeout=SITE_CHECK_TIMEOUT_SECONDS)
+    return response is not None and response.status_code < 500
 
 
 async def _detect_traffic_drop(brand: Brand) -> None:
