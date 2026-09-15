@@ -62,7 +62,7 @@ async def fan_out_approval(artifact: Artifact, approved_rows: list[int] | None =
 
     if artifact.type == "plan":
         # an approved roadmap re-grounds the target query list (#4 re-run)
-        await create_task(brand_id=artifact.brand_id, name="prompt_research", queue="research")
+        await create_task(brand_id=artifact.brand_id, name="research_prompts", queue="research")
         # #25 — workstreams the Strategist marked as needing client-collected
         # data become bare client-contribution rows (no queue job; the daily
         # chase nags them; the study write-up rides content_draft once the
@@ -72,7 +72,7 @@ async def fan_out_approval(artifact: Artifact, approved_rows: list[int] | None =
             Database.session.add(Task(brand_id=artifact.brand_id, name="collect_study_data", payload={"workstream": workstream.get("name")}))
         if study_workstreams:
             await Database.session.flush()
-        return ["prompt_research"] + ["collect_study_data"] * len(study_workstreams)
+        return ["research_prompts"] + ["collect_study_data"] * len(study_workstreams)
 
     if artifact.type in ("gbp_touches", "reply"):
         # GBP work goes live via the GBP adapter, not the site engine

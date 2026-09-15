@@ -30,8 +30,10 @@ import re
 from datetime import datetime, timedelta
 
 import httpx
+import jwt
 from sqlalchemy import select
 
+import settings
 from objects.brand import Brand
 from objects.brand_market import BrandMarket
 from objects.finding import SEVERITY_SERIOUS, SEVERITY_WARN, Finding
@@ -39,6 +41,7 @@ from objects.market import SOURCE_SYSTEM, Market
 from objects.organization import Organization
 from objects.site import Site
 from objects.task import STATUS_DONE, STATUS_QUEUED, Task
+from objects.user import User
 from objects.visibility_run import STATUS_DONE as RUN_DONE
 from objects.visibility_run import VisibilityRun
 from utils.database import Database, ReplicaDatabase
@@ -246,6 +249,34 @@ async def seed_test_brand_with_history(session) -> None:
     # print(f"\nseeded. brand_id for tinker.py: {test_brand.id}")
 
 
+async def seed_test_user(session, organization_id: str) -> None:
+    """Tie the TEST_RUNNER Supabase account to the test organization so a
+    bearer token from that account passes utils.authz.guard as an admin of
+    the seeded org (GET /me -> onboarded brand, every /brands/{id} route
+    resolves). guard looks users up by the token's `sub`, so we must learn
+    that id the only way there is: sign the runner in (same call the test
+    suite's tests/_auth makes). Runs on EVERY seed — the suite's
+    release_runner() detaches the runner between signups, so re-tying is
+    what a re-run wants. Skips cleanly when the creds aren't in .env."""
+    url = str(settings.SUPABASE_URL).strip().rstrip("/")
+    anon_key = str(getattr(settings, "SUPABASE_PUBLISHABLE_KEY", "")).strip()
+    email = str(getattr(settings, "TEST_RUNNER_EMAIL", "")).strip().lower()
+    password = str(getattr(settings, "TEST_RUNNER_PASSWORD", ""))
+    if not url or url == "https://test.invalid" or not anon_key or not email or not password:
+        print("9.  test user: SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY / TEST_RUNNER_EMAIL / TEST_RUNNER_PASSWORD not set — skipping (no bearer login for the seeded org)")
+        return
+    async with httpx.AsyncClient(timeout=15.0) as web:
+        response = await web.post(f"{url}/auth/v1/token", params={"grant_type": "password"}, headers={"apikey": anon_key, "Content-Type": "application/json"}, json={"email": email, "password": password})
+    if response.status_code != 200:
+        print(f"9.  test user: Supabase sign-in failed for {email} ({response.status_code}) — skipping")
+        return
+    # decoded WITHOUT verification only to learn the id; the app verifies for real on every request
+    supabase_user_id = jwt.decode(response.json()["access_token"], options={"verify_signature": False})["sub"]
+    user = await User.upsert_from_claims(auth_sub=supabase_user_id, email=email)
+    await User.claim_organization(user.id, organization_id)
+    print(f"9.  test user: {email} ({user.id}) -> admin of organization {organization_id}")
+
+
 ##############################
 # MAIN
 ##############################
@@ -269,6 +300,10 @@ async def seed() -> None:
                 print(f"2-8. '{TEST_ORGANIZATION_NAME}' already exists — skipping")
             else:
                 await seed_test_brand_with_history(session)
+
+            # ---- step 9: the login — every run, so the runner is always tied to THIS org
+            test_organization_id = (await session.execute(select(Organization.id).where(Organization.name == TEST_ORGANIZATION_NAME).limit(1))).scalar_one()
+            await seed_test_user(session, test_organization_id)
 
             await session.commit()
 

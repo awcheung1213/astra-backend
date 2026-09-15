@@ -21,8 +21,8 @@ from utils.task_queue import task_lifecycle
 from worker.app import app
 
 
-@app.task(name="prompt_research", queue="research", retry=2)
-async def prompt_research(task_id: str, brand_id: str) -> None:
+@app.task(name="research_prompts", queue="research", retry=2)
+async def research_prompts(task_id: str, brand_id: str) -> None:
     """#4 — AI-prompt research -> the brand's target query list. Generated
     prompts land INACTIVE (source=generated) for human sign-off; activation
     is the prompt sign-off endpoint's job (which also starts the #6 baseline
@@ -35,11 +35,11 @@ async def prompt_research(task_id: str, brand_id: str) -> None:
         real_queries = await _gsc_top_queries(brand)
 
         agent_output = await ClaudeAgent().run_agent(
-            system=PROMPT_RESEARCH_SYSTEM,
+            system=RESEARCH_PROMPTS_SYSTEM,
             prompt=_research_prompt(brand, existing_prompts, real_queries),
             tools=[],
             handlers={},
-            operation="prompt_research",
+            operation="research_prompts",
             organization_id=brand.organization_id,
             brand_id=brand.id,
             task_id=task_id,
@@ -57,8 +57,8 @@ async def prompt_research(task_id: str, brand_id: str) -> None:
         logger.info(f"[research] brand {brand.id}: {created_count} prompts generated (inactive, awaiting sign-off), {len(generated) - created_count} duplicates skipped")
 
 
-@app.task(name="competitor_bootstrap", queue="research", retry=2)
-async def competitor_bootstrap(task_id: str, brand_id: str) -> None:
+@app.task(name="research_competitors", queue="research", retry=2)
+async def research_competitors(task_id: str, brand_id: str) -> None:
     """#5 (bootstrap half) — one call seeding the brand's competitor list so
     matching works from day one; run-time discovery (collection.py's ~5%
     sampling) grows it from here. Upserts, so a retry never duplicates."""
@@ -66,11 +66,11 @@ async def competitor_bootstrap(task_id: str, brand_id: str) -> None:
         brand = await Brand.get(brand_id)
 
         agent_output = await ClaudeAgent().run_agent(
-            system=COMPETITOR_BOOTSTRAP_SYSTEM,
+            system=RESEARCH_COMPETITORS_SYSTEM,
             prompt=_bootstrap_prompt(brand),
             tools=[],
             handlers={},
-            operation="competitor_bootstrap",
+            operation="research_competitors",
             organization_id=brand.organization_id,
             brand_id=brand.id,
             task_id=task_id,
@@ -115,7 +115,7 @@ async def _gsc_top_queries(brand: Brand) -> list[dict]:
 ##############################
 
 # STATIC on purpose (cache_control): brand specifics ride the task prompt.
-PROMPT_RESEARCH_SYSTEM = """You research how consumers ask AI assistants (Claude, ChatGPT, Gemini) for recommendations in a product or service category.
+RESEARCH_PROMPTS_SYSTEM = """You research how consumers ask AI assistants (Claude, ChatGPT, Gemini) for recommendations in a product or service category.
 
 You produce realistic consumer questions — the questions real people actually type, in their words, covering different intents: recommendations ("best X near me"), comparisons, problem-first questions ("who fixes X"), and occasion/need-based asks.
 
@@ -126,7 +126,7 @@ HARD RULES:
 Respond with ONLY a JSON array, no prose and no code fences. Each entry:
 {"text": "the consumer question", "category": "a short intent label, e.g. recommendation | comparison | problem | occasion"}"""
 
-COMPETITOR_BOOTSTRAP_SYSTEM = """You identify the competitors of a brand: businesses a consumer would realistically consider instead, in the same product or service category.
+RESEARCH_COMPETITORS_SYSTEM = """You identify the competitors of a brand: businesses a consumer would realistically consider instead, in the same product or service category.
 
 Exclude retailers, marketplaces, aggregators, and directories — only direct competitors that sell or provide the same kind of thing. Prefer competitors an AI assistant would plausibly mention when recommending in this category.
 

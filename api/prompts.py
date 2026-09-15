@@ -1,6 +1,6 @@
 """Prompt sign-off — #4's human half, and the #6 baseline's trigger.
 
-prompt_research lands generated prompts INACTIVE; here the human activates
+research_prompts lands generated prompts INACTIVE; here the human activates
 the ones they want measured. The first sign-off also starts the baseline:
 collection is deferred immediately (corpus-deduped, so re-running is nearly
 free), and the next Sunday visibility_run scores the brand's first trend

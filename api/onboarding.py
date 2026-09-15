@@ -44,8 +44,8 @@ router = APIRouter(prefix="/api/v1")
 # launch enqueues the rest (#8, and the first #3 sweep — the crawler needs
 # only website_url, no connected site).
 RESEARCH_WORK = (
-    ("prompt_research", "research"),
-    ("competitor_bootstrap", "research"),
+    ("research_prompts", "research"),
+    ("research_competitors", "research"),
 )
 LAUNCH_WORK = (
     ("plan_update", "planning"),
@@ -175,7 +175,7 @@ async def interview(brand_id: str, request: InterviewRequest) -> InterviewRespon
     """#2 — store the AM-conducted interview verbatim, extract the brand
     context from it (agent, no tools), mark the answer_sme_interview client
     task done so the chase stops nagging, and kick off the research pair —
-    the extraction is exactly what competitor_bootstrap and prompt_research
+    the extraction is exactly what research_competitors and research_prompts
     ground in, and firing them here (not at launch) is what puts real
     competitors + questions on the wizard's review step. The response is the
     extraction for the client to confirm."""

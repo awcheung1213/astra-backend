@@ -32,7 +32,7 @@ built yet — chained/event runners register in the same change as their produce
 | 1 | Access provisioning | `api/onboarding.py` *(planned)* creates the client-task rows (no queue job); `worker/tasks/briefs.py` `client_chase` nags them daily |
 | 2 | Kickoff interview → business context | `api/onboarding.py` *(planned)*, AM-conducted → `brands` context fields |
 | 3 | Full technical audit | `worker/tasks/site_audit.py` (fires at site connect, then weekly) |
-| 4 | Keyword + AI-prompt research | `worker/tasks/research.py` *(planned)* `prompt_research`, fired by onboarding, re-fired by plan updates |
+| 4 | Keyword + AI-prompt research | `worker/tasks/research.py` *(planned)* `research_prompts`, fired by onboarding, re-fired by plan updates |
 | 5 | Competitor & citation-source gap analysis | `worker/tasks/research.py` *(planned)* bootstrap + `worker/tasks/collection.py` continuous ~5% discovery sampling |
 | 6 | Baseline report | the brand's first run of `worker/tasks/visibility.py` + `worker/tasks/reports.py`, fired by onboarding |
 | 7 | Conversion tracking setup | `api/onboarding.py` *(planned)* config + a client verification task (chased via `briefs.py`) |
@@ -111,7 +111,7 @@ flowchart LR
         REF["content.py #12<br/>content_refresh (Content)"]
         SCOUT["outreach.py #13 #20 #21 #22<br/>outreach_scout (Scout + web search)"]
         REP["reputation.py #14 #15<br/>gbp_management · review_asks<br/>review_response (Reputation)"]
-        RES["research.py #4 #5<br/>prompt_research<br/>competitor_bootstrap"]
+        RES["research.py #4 #5<br/>research_prompts<br/>research_competitors"]
         DIAG["planning.py #23<br/>diagnosis (Analyst)"]
         PLAN["planning.py #24 #8<br/>plan_update (Strategist)"]
         AM["briefs.py Pulse #1-chase<br/>weekly_brief · client_chase (AM)<br/>reports.py #16 monthly_report (AM)"]
@@ -171,7 +171,7 @@ worker/tasks/
 ├── reports.py      monthly_report — _assemble_report_facts, idempotent by period
 ├── planning.py     plan_update · diagnosis — _assemble_plan_facts,
 │                   _assemble_diagnosis_facts (dated timeline)
-├── research.py     prompt_research · competitor_bootstrap — task-specific static
+├── research.py     research_prompts · research_competitors — task-specific static
 │                   system prompts (not roles)
 └── changes.py      change_set_apply — operations_for_artifact, invert_operations,
                     APPLY_ENABLED_PLATFORMS + per-platform write seam

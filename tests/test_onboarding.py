@@ -48,7 +48,7 @@ async def test_interview_extracts_and_fires_the_research_pair(client, monkeypatc
 
     worklog = (await client.get(f"/api/v1/brands/{brand_id}/worklog")).json()
     queued_names = {task["name"] for task in worklog["queued"]} | {task["name"] for task in worklog["running"]}
-    assert {"prompt_research", "competitor_bootstrap"} <= queued_names
+    assert {"research_prompts", "research_competitors"} <= queued_names
 
 
 async def test_launch_after_interview_skips_the_answered_interview(client, monkeypatch):
@@ -92,7 +92,7 @@ async def test_skipped_interview_waits_and_the_late_answer_fires_research(client
     assert "answer_sme_interview" not in {task["name"] for task in approvals["waiting_on_you"]}
     worklog = (await client.get(f"/api/v1/brands/{brand_id}/worklog")).json()
     queued_names = {task["name"] for task in worklog["queued"]} | {task["name"] for task in worklog["running"]}
-    assert {"prompt_research", "competitor_bootstrap"} <= queued_names
+    assert {"research_prompts", "research_competitors"} <= queued_names
 
 
 async def test_competitor_review_add_list_remove(client):
