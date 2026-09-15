@@ -31,6 +31,12 @@ from worker.tasks.changes import APPLY_ENABLED_PLATFORMS, operations_for_artifac
 # informational types never sit at pending review, so neither needs a row.)
 ALWAYS_APPROVE_ARTIFACT_TYPES = {"reply", "gbp_touches", "pitch"}
 
+# types whose approval is applied THROUGH the brand's connected site (the
+# change-set engine). Approving one with no site connected strands it:
+# recorded approved, nothing to apply, no way back to the queue — so both the
+# review endpoint and the birth path refuse until a site is connected.
+SITE_APPLIED_ARTIFACT_TYPES = {"change_proposal", "draft"}
+
 
 def requires_human_approval(artifact_type: str) -> bool:
     """Consulted by every auto-approve path (approval_settings MODE_AUTO)
@@ -44,8 +50,16 @@ async def initial_artifact_status(brand_id: str, task_name: str, artifact_type: 
     the PRODUCING task. Default mode is approve — no row means reviewed."""
     if requires_human_approval(artifact_type):
         return STATUS_PENDING_REVIEW
+    if await needs_site_connection(brand_id, artifact_type):
+        return STATUS_PENDING_REVIEW  # auto-approving now would strand it; it waits in the queue for the connect
     mode = await ApprovalSetting.mode_for(brand_id, task_name)
     return STATUS_AUTO_APPROVED if mode == MODE_AUTO else STATUS_PENDING_REVIEW
+
+
+async def needs_site_connection(brand_id: str, artifact_type: str) -> bool:
+    """True when approving this type would need the site engine and the brand
+    has no connected site — the gate the review endpoint 409s on."""
+    return artifact_type in SITE_APPLIED_ARTIFACT_TYPES and await Site.by_brand(brand_id) is None
 
 
 async def fan_out_approval(artifact: Artifact, approved_rows: list[int] | None = None) -> list[str]:

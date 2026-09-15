@@ -70,7 +70,11 @@ async def test_reset_preset_replaces_rows(client):
     assert patched["approval_preset"] == "balanced"
 
 
-async def test_born_status_floor_then_rows(client):
+async def test_born_status_floor_then_rows(client, monkeypatch):
+    async def verify(self):
+        pass
+
+    monkeypatch.setattr(WordPressAdapter, "verify", verify)
     brand_id = await _signup(client)
     assert (await client.post(f"/api/v1/brands/{brand_id}/launch", json={"approval_preset": "hands_off"})).status_code == 200
 
@@ -78,7 +82,12 @@ async def test_born_status_floor_then_rows(client):
         # floor types never auto-ship, even under the loosest preset
         assert await initial_artifact_status(brand_id, "review_response", "reply") == STATUS_PENDING_REVIEW
         assert await initial_artifact_status(brand_id, "gbp_management", "gbp_touches") == STATUS_PENDING_REVIEW
-        # preset rows carry the reversible tier
+        # site changes wait for a connected site even under hands_off (auto-approving
+        # with nothing to apply to would strand them) ...
+        assert await initial_artifact_status(brand_id, "technical_fix", "change_proposal") == STATUS_PENDING_REVIEW
+    assert (await client.post(f"/api/v1/brands/{brand_id}/site", json={"platform": "wordpress", "credentials": WP_CREDENTIALS})).status_code == 200
+    async with ReplicaDatabase().connection(), Database().connection():
+        # ... and once it is connected the preset rows carry the reversible tier
         assert await initial_artifact_status(brand_id, "technical_fix", "change_proposal") == STATUS_AUTO_APPROVED
         assert await initial_artifact_status(brand_id, "content_draft", "draft") == STATUS_AUTO_APPROVED
         # tasks the macro doesn't list default to reviewed
@@ -118,3 +127,33 @@ async def test_auto_born_change_proposal_dispatches_at_birth(client, monkeypatch
     assert artifact_id not in {pending["id"] for pending in approvals["pending"]}
     worklog = (await client.get(f"/api/v1/brands/{brand_id}/worklog")).json()
     assert "change_set_apply" in {task["name"] for task in worklog["queued"]}
+
+
+async def test_site_changes_wait_for_a_connected_site(client, monkeypatch):
+    """No site connected: a site change is born pending even under Balanced,
+    and approving it 409s; once the site connects the same approval fans out."""
+    brand_id = await _signup(client)
+    assert (await client.post(f"/api/v1/brands/{brand_id}/launch", json={"approval_preset": "balanced"})).status_code == 200
+
+    async with ReplicaDatabase().connection(), Database().connection():
+        assert await initial_artifact_status(brand_id, "technical_fix", "change_proposal") == STATUS_PENDING_REVIEW
+        producer_task = Task(brand_id=brand_id, name="technical_fix")
+        Database.session.add(producer_task)
+        await Database.session.flush()
+        artifact = await Artifact.create(task_id=producer_task.id, brand_id=brand_id, type="change_proposal", content={"operations": [{"field": "title", "url": "https://example.com", "value": "Better title"}]}, status=STATUS_PENDING_REVIEW)
+        await Database.session.commit()
+        artifact_id = artifact.id
+
+    refused = await client.post(f"/api/v1/artifacts/{artifact_id}/review", json={"decision": "approve"})
+    assert refused.status_code == 409
+    assert "Connect your site" in refused.json()["detail"]
+    assert artifact_id in {pending["id"] for pending in (await client.get(f"/api/v1/brands/{brand_id}/approvals")).json()["pending"]}  # still in the queue
+
+    async def verify(self):
+        pass
+
+    monkeypatch.setattr(WordPressAdapter, "verify", verify)
+    assert (await client.post(f"/api/v1/brands/{brand_id}/site", json={"platform": "wordpress", "credentials": WP_CREDENTIALS})).status_code == 200
+    approved = await client.post(f"/api/v1/artifacts/{artifact_id}/review", json={"decision": "approve"})
+    assert approved.status_code == 200
+    assert approved.json()["queued_work"] == ["change_set_apply"]
