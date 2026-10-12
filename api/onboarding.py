@@ -8,7 +8,8 @@ launch closes the flow with the goal. Each enqueue has exactly ONE owner, so
 no dedupe checks are needed: the interview owns the research pair (research
 grounds in the extraction, so it fires when the interview lands — at signup
 time normally, or later from Tasks if it was skipped, which the daily chase
-nags for), and launch owns plan_update + site_audit + the client-task rows,
+nags for; a post-launch EDIT of an answered interview updates facts only,
+DEC-024), and launch owns plan_update + site_audit + the client-task rows,
 single-shot behind its 409.
 
 Auth rides the router-level guard (utils/authz.py): signup requires only a
@@ -16,7 +17,6 @@ valid token (the caller has no org yet — signup is what claims one, exactly
 once per user); interview/launch are brand-guarded by path."""
 
 import json
-from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request, status
 
@@ -33,9 +33,11 @@ from objects.site import STATUS_CONNECTED, Site
 from objects.task import STATUS_DONE, Task
 from objects.user import User
 from schemas.onboarding_schemas import InterviewRequest, InterviewResponse, LaunchRequest, LaunchResponse, SignupRequest, SignupResponse
+from utils import clock
 from utils.agent_prompts import ROLE_ACCOUNT_MANAGER
 from utils.authz import current_user
 from utils.database import Database
+from utils.first_plan import queue_first_plan_when_ready
 from utils.task_queue import create_task
 
 router = APIRouter(prefix="/api/v1")
@@ -49,10 +51,10 @@ RESEARCH_WORK = (
     ("research_prompts", "research"),
     ("research_competitors", "research"),
 )
-LAUNCH_WORK = (
-    ("plan_update", "planning"),
-    ("site_audit", "audit"),
-)
+# launch's own kickoff work. The first plan_update is NOT here: it is queued
+# by whichever first-plan input (this audit, the interview's research) lands
+# last — utils/first_plan.py
+LAUNCH_WORK = (("site_audit", "audit"),)
 
 # launch's slice of briefs.CLIENT_TASK_NAMES (the chase vocabulary)
 ONBOARDING_CLIENT_TASKS = ("answer_sme_interview", "grant_access", "upload_photos", "verify_conversion_tracking")
@@ -64,15 +66,18 @@ async def signup(request: SignupRequest, http_request: Request) -> SignupRespons
     (+ the goal when one was set), claimed by the signed-in caller (a user
     belongs to exactly ONE org). Re-entry with an unlaunched brand hands the
     existing ids back instead of 409ing, so a wizard resumed on a fresh
-    device (no sessionStorage) doesn't strand at step 3; a launched brand
-    means the caller shouldn't be in the wizard at all — 409."""
+    device (no sessionStorage) doesn't strand at step 3 — validated exactly
+    like a first signup, and the re-entered name/site/coverage APPLIED to
+    that brand (the goal is left to launch, which sets it anyway). A
+    launched brand means the caller shouldn't be in the wizard at all — 409."""
     user = current_user(http_request)
+    resumed_brand: Brand | None = None
     if user.organization_id is not None:
         existing_brands = await Brand.by_organization_id(user.organization_id)
         unlaunched = [brand for brand in existing_brands if brand.onboarded_at is None]
         if not unlaunched:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="you already have an organization")
-        return SignupResponse.create({"organization_id": user.organization_id, "brand_id": unlaunched[0].id})
+        resumed_brand = unlaunched[0]
 
     brand_name = request.brand_name.strip()
     website_url = request.website_url.strip()
@@ -83,6 +88,12 @@ async def signup(request: SignupRequest, http_request: Request) -> SignupRespons
     # a local brand with no markets would silently collect nothing forever —
     # validate the city list up front (parse errors 422 before any row lands)
     city_pairs = _parse_cities(request.cities or []) if request.footprint == FOOTPRINT_LOCAL else []
+
+    if resumed_brand is not None and user.organization_id is not None:
+        brand = await Brand.update(resumed_brand.id, name=brand_name, website_url=website_url, footprint=request.footprint)
+        await Organization.update(user.organization_id, name=request.organization_name.strip() or brand_name)
+        await Brand.replace_user_markets(brand.id, [(await Market.get_or_create_city(city, state)).id for city, state in city_pairs])
+        return SignupResponse.create({"organization_id": user.organization_id, "brand_id": brand.id})
 
     organization = await Organization.create(name=request.organization_name.strip() or brand_name)
     brand = Brand(organization_id=organization.id, name=brand_name, website_url=website_url, footprint=request.footprint)
@@ -154,8 +165,11 @@ async def launch(brand_id: str, request: LaunchRequest | None = None) -> LaunchR
     # TODO(#7, config half): GA4 events + call-tracking config needs the Google
     #       adapter; until then only the client verification task row exists.
 
-    await Brand.update(brand.id, onboarded_at=datetime.now(), approval_preset=request.approval_preset or brand.approval_preset)
-    return LaunchResponse.create({"brand_id": brand.id, "client_tasks": client_tasks_created, "queued_work": [work_name for work_name, _ in LAUNCH_WORK]})
+    await Brand.update(brand.id, onboarded_at=clock.now(), approval_preset=request.approval_preset or brand.approval_preset)
+    queued_work = [work_name for work_name, _ in LAUNCH_WORK]
+    if await queue_first_plan_when_ready(brand.id):
+        queued_work.append("plan_update")  # nothing else in flight (e.g. interview skipped): plan now
+    return LaunchResponse.create({"brand_id": brand.id, "client_tasks": client_tasks_created, "queued_work": queued_work})
 
 
 async def _client_tasks_already_satisfied(brand: Brand) -> set[str]:
@@ -178,6 +192,7 @@ async def _client_tasks_already_satisfied(brand: Brand) -> set[str]:
 @router.post("/brands/{brand_id}/interview", response_model=InterviewResponse)
 async def interview(brand_id: str, request: InterviewRequest) -> InterviewResponse:
     brand = await Brand.get(brand_id)
+    queue_research = interview_queues_research(brand.onboarded_at is not None, bool(brand.interview_raw))
 
     extraction_json = await ClaudeAgent().run_role(
         ROLE_ACCOUNT_MANAGER,
@@ -203,12 +218,21 @@ async def interview(brand_id: str, request: InterviewRequest) -> InterviewRespon
     if interview_task is not None:
         await Task.update_status(interview_task.id, STATUS_DONE)
 
-    for work_name, work_queue in RESEARCH_WORK:
+    research_work = RESEARCH_WORK if queue_research else ()  # DEC-024
+    for work_name, work_queue in research_work:
         if await Task.first_queued(brand.id, work_name) is not None:
             continue  # a repeat submit re-extracts the facts but never double-runs the research
         await create_task(brand_id=brand.id, name=work_name, queue=work_queue)
 
     return InterviewResponse.create({"brand_id": brand.id, **context})
+
+
+def interview_queues_research(launched: bool, previously_answered: bool) -> bool:
+    """DEC-024: once launched, an interview EDIT updates the brand facts only —
+    research re-runs via plan approval, not every resubmit. The first answer
+    still grounds research wherever it lands (a skipped interview answered
+    from Tasks after launch)."""
+    return not (launched and previously_answered)
 
 
 EXTRACTION_FIELDS = ("description", "category", "audience", "differentiators")
@@ -236,4 +260,11 @@ def _parse_extraction(agent_output: str) -> dict:
         context = None
     if not isinstance(context, dict) or not all(field in context for field in EXTRACTION_FIELDS):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="interview extraction failed — retry")
-    return {field: context[field] for field in EXTRACTION_FIELDS}
+    # typed at the boundary: brands.differentiators is a JSONB list[str], the rest are text (null = not covered)
+    extracted = {field: "" if context[field] is None else context[field] for field in EXTRACTION_FIELDS if field != "differentiators"}
+    differentiators = context["differentiators"] or []
+    if isinstance(differentiators, str):
+        differentiators = [differentiators]  # a lone string is one differentiator, never a char list
+    if not all(isinstance(value, str) for value in extracted.values()) or not isinstance(differentiators, list) or not all(isinstance(item, str) for item in differentiators):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="interview extraction failed — retry")
+    return {**extracted, "differentiators": [item.strip() for item in differentiators if item.strip()]}

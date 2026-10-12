@@ -5,6 +5,7 @@ from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, String, Unique
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 FRAMEWORK_VERSION = "1.0.0"  # weights live in code, version stamped per run
@@ -34,7 +35,7 @@ class VisibilityRun(SQLModel, BaseObject, table=True):
     top3_rate: float | None = Field(default=None, sa_column=Column(Float, nullable=True))
     citation_rate: float | None = Field(default=None, sa_column=Column(Float, nullable=True))
     framework_version: str = Field(default=FRAMEWORK_VERSION)
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def get_or_create_for_week(brand_id: str, week_of: date) -> "VisibilityRun":

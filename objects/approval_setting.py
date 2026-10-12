@@ -5,6 +5,7 @@ from sqlalchemy import Column, DateTime, ForeignKey, String, UniqueConstraint, d
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 MODE_AUTO = "auto"
@@ -37,7 +38,7 @@ class ApprovalSetting(SQLModel, BaseObject, table=True):
     brand_id: str = Field(sa_column=Column(String, ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True))
     task_name: str
     mode: str = Field(default=MODE_APPROVE, sa_column=Column(String, server_default=MODE_APPROVE, nullable=False))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def apply_preset(brand_id: str, preset: str) -> list[str]:

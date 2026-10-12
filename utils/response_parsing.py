@@ -26,11 +26,20 @@ def split_list_items(text: str) -> list[str]:
     return []
 
 
+def name_pattern(name: str) -> re.Pattern[str]:
+    """Whole-word, case-insensitive: "Ace" never matches "place"."""
+    return re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
+
+
+def mentions_name(text: str, name: str) -> bool:
+    return bool(name_pattern(name).search(text))
+
+
 def parse_prompt_result_for_mention_rank(text: str, names: list[str]) -> dict[str, int | None]:
     list_items = split_list_items(text)
     mention_ranks: dict[str, int | None] = {}
     for name in names:
-        pattern = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
+        pattern = name_pattern(name)
         mention_ranks[name] = None
         for index, item in enumerate(list_items, start=1):
             if pattern.search(item):

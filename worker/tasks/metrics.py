@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from sqlalchemy import select
 
@@ -9,14 +9,15 @@ from objects.finding import SEVERITY_SERIOUS, Finding
 from objects.metric_point import MetricPoint
 from objects.notification import KIND_ALERT, URGENCY_URGENT, Notification
 from objects.task import Task
+from utils import clock
 from utils.database import ReplicaDatabase
 from utils.logger import logger
 from utils.site_fetch import fetch_page
-from utils.task_queue import create_task, task_lifecycle
+from utils.task_queue import RETRY_WITH_BACKOFF, create_task, task_lifecycle
 from worker.app import app
 
 
-@app.task(name="metrics_ingestion", queue="metrics", retry=2)
+@app.task(name="metrics_ingestion", queue="metrics", retry=RETRY_WITH_BACKOFF)
 async def metrics_ingestion(task_id: str, brand_id: str) -> None:
     """#18 (dashboards) — the Monday source-poller sweep: for each CONNECTED
     read integration, pull the trailing window of daily rows into the one
@@ -24,7 +25,7 @@ async def metrics_ingestion(task_id: str, brand_id: str) -> None:
     day) identity, so re-syncing the window self-corrects late-arriving
     GA4/GSC data and retries are safe. No connections = a free no-op."""
     async with task_lifecycle(task_id):
-        window_start = date.today() - timedelta(days=SYNC_WINDOW_DAYS)
+        window_start = min(clock.today(), date.today()) - timedelta(days=SYNC_WINDOW_DAYS)  # sent to Google's real API: sim time must never ask for future days
         connections = await Connection.connected_for_brand(brand_id)
 
         upserted_count = 0
@@ -64,13 +65,14 @@ async def _sync_gsc(connection: Connection, window_start: date) -> list[dict]:
     API doesn't expose them (verified 2026-08-30) — revisit once a real
     source is designed (forwarded GSC email, or URL-inspection sampling)."""
     google = GoogleAdapter(connection)
-    window_end = date.today() - timedelta(days=GSC_DATA_LAG_DAYS)
+    window_end = min(clock.today(), date.today()) - timedelta(days=GSC_DATA_LAG_DAYS)  # sent to Google's real API: sim time must never ask for future days
+    gsc_start = window_start - timedelta(days=GSC_DATA_LAG_DAYS)  # shift WITH the lagged end (endDate is inclusive): weekly sweeps tile with a 1-day overlap, no gap day (BUG-048)
 
     points = []
-    for daily in await google.search_daily_totals(window_start, window_end):
+    for daily in await google.search_daily_totals(gsc_start, window_end):
         points.append({"source": "gsc", "metric": "clicks", "day": daily["day"], "value": daily["clicks"]})
         points.append({"source": "gsc", "metric": "impressions", "day": daily["day"], "value": daily["impressions"]})
-    for page_daily in await google.search_daily_clicks_by_page(window_start, window_end):
+    for page_daily in await google.search_daily_clicks_by_page(gsc_start, window_end):
         points.append({"source": "gsc", "metric": "page_clicks", "dimension": page_daily["page"], "day": page_daily["day"], "value": page_daily["clicks"]})
     return points
 
@@ -79,7 +81,8 @@ async def _sync_ga4(connection: Connection, window_start: date) -> list[dict]:
     """GA4: daily sessions + key events (GA4's name for conversions)."""
     google = GoogleAdapter(connection)
     points = []
-    for daily in await google.analytics_daily(window_start, date.today()):
+    window_end = min(clock.today(), date.today())  # sent to Google's real API: sim time must never ask for future days
+    for daily in await google.analytics_daily(window_start, window_end):
         points.append({"source": "ga4", "metric": "sessions", "day": daily["day"], "value": daily["sessions"]})
         points.append({"source": "ga4", "metric": "key_events", "day": daily["day"], "value": daily["key_events"]})
     return points
@@ -140,7 +143,7 @@ async def _site_is_reachable(url: str) -> bool:
 async def _detect_traffic_drop(brand: Brand) -> None:
     """An update-shaped change-point: total search clicks down sharply week
     over week -> urgent alert + ONE chained diagnosis (#23)."""
-    today = date.today()
+    today = clock.today()
     recent_totals = await MetricPoint.totals_for_period(brand.id, today - timedelta(days=7), today)
     prior_totals = await MetricPoint.totals_for_period(brand.id, today - timedelta(days=14), today - timedelta(days=7))
     recent_clicks, prior_clicks = recent_totals.get("gsc:clicks", 0.0), prior_totals.get("gsc:clicks", 0.0)
@@ -163,7 +166,7 @@ async def _detect_traffic_drop(brand: Brand) -> None:
 async def _detect_page_decay(brand: Brand) -> None:
     """Pages whose last week fell far below their own 4-week weekly baseline
     -> ONE chained content_refresh each (#12), biggest losers first."""
-    today = date.today()
+    today = clock.today()
     last_week_by_page = await MetricPoint.totals_by_dimension(brand.id, "gsc", "page_clicks", today - timedelta(days=7), today)
     baseline_by_page = await MetricPoint.totals_by_dimension(brand.id, "gsc", "page_clicks", today - timedelta(days=35), today - timedelta(days=7))
 
@@ -186,12 +189,12 @@ async def _detect_page_decay(brand: Brand) -> None:
 
 
 async def _alerted_recently(organization_id: str, title: str) -> bool:
-    cooldown_cutoff = datetime.now() - timedelta(days=ALERT_COOLDOWN_DAYS)
+    cooldown_cutoff = clock.now() - timedelta(days=ALERT_COOLDOWN_DAYS)
     rows = await ReplicaDatabase.session.execute(select(Notification.id).where(Notification.organization_id == organization_id).where(Notification.title == title).where(Notification.created_at > cooldown_cutoff).limit(1))  # type: ignore
     return rows.first() is not None
 
 
-@app.task(name="alert_detection", queue="metrics", retry=2)
+@app.task(name="alert_detection", queue="metrics", retry=RETRY_WITH_BACKOFF)
 async def alert_detection(task_id: str, brand_id: str) -> None:
     """#19 — pure-code detectors over fresh signals (metric points, one live
     reachability check) -> urgent Pulse + chained work: content_refresh per

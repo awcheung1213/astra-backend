@@ -6,6 +6,7 @@ from sqlmodel import Field, SQLModel, delete
 
 from exceptions.exceptions import OrganizationNotFound
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 
@@ -15,7 +16,7 @@ class Organization(SQLModel, BaseObject, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     name: str
     plan: str | None = Field(default=None, sa_column=Column(String, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def get(id: str) -> "Organization":

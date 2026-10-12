@@ -13,15 +13,16 @@ composes after READING the current content — there are no per-SEO-feature
 branches here on purpose (agent-tools-plan.md Phase 1).
 
 Contract with the engine: every write READS the current value of the SAME
-field first and returns it as previous_value (reverts restore it); anything
-created returns created_ref."""
+field first, checkpoints it BEFORE writing, and returns it as previous_value
+(reverts restore it); anything created checkpoints + returns created_ref, and
+a publish whose op already carries a created_ref never creates again."""
 
 from urllib.parse import urlparse
 
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.session import HttpMethod
 
-from adapters.cms.common import WRITE_TIMEOUT_SECONDS, CmsWriteError, markdown_to_html, path_slug
+from adapters.cms.common import WRITE_TIMEOUT_SECONDS, Checkpoint, CmsWriteError, markdown_to_html, no_checkpoint, path_slug
 from objects.site import Site
 from utils.site_fetch import RequestsError, site_session
 from utils.token_crypto import decrypt_credentials
@@ -52,18 +53,18 @@ class WordPressAdapter:
         async with site_session(timeout=WRITE_TIMEOUT_SECONDS, auth=self.auth) as client:
             await self._request(client, "GET", "/wp-json/wp/v2/pages?per_page=1&context=edit")
 
-    async def apply(self, operation: dict) -> dict:
+    async def apply(self, operation: dict, checkpoint: Checkpoint = no_checkpoint) -> dict:
         async with site_session(timeout=WRITE_TIMEOUT_SECONDS, auth=self.auth) as client:
             if operation["op"] == "publish_page":
-                return await self._publish_page(client, operation["value"])
+                return await self._publish_page(client, operation["value"], operation.get("created_ref"), checkpoint)
             if operation["op"] == "unpublish_page":
-                return await self._unpublish_page(client, operation["target"])
+                return await self._unpublish_page(client, operation["target"], checkpoint)
 
             kind, page = await self._page_for_url(client, operation["target"])
             if operation["op"] == "update_page":
-                return await self._update_page(client, kind, page, operation["value"])
+                return await self._update_page(client, kind, page, operation["value"], checkpoint)
             if operation["op"] == "set_field":
-                return await self._set_field(client, kind, page, operation["field"], operation["value"])
+                return await self._set_field(client, kind, page, operation["field"], operation["value"], checkpoint)
             raise CmsWriteError(f"wordpress adapter does not know operation {operation['op']!r}")
 
     ##############################
@@ -92,23 +93,29 @@ class WordPressAdapter:
     # OPERATIONS
     ##############################
 
-    async def _set_field(self, client: AsyncSession, kind: str, page: dict, field: str, value) -> dict:
+    async def _set_field(self, client: AsyncSession, kind: str, page: dict, field: str, value, checkpoint: Checkpoint = no_checkpoint) -> dict:
         native = self.resolve_field(field)
         previous_value = _raw(page.get(native))
+        await checkpoint({"previous_value": previous_value})
         await self._request(client, "POST", f"/wp-json/wp/v2/{kind}/{page['id']}", {native: value})
         return {"previous_value": previous_value}
 
-    async def _update_page(self, client: AsyncSession, kind: str, page: dict, value: dict) -> dict:
+    async def _update_page(self, client: AsyncSession, kind: str, page: dict, value: dict, checkpoint: Checkpoint = no_checkpoint) -> dict:
         previous_value = {"title": _raw(page.get("title")), "meta_description": _raw(page.get("excerpt")), "body_markdown": _raw(page.get("content"))}
+        await checkpoint({"previous_value": previous_value})
         await self._request(client, "POST", f"/wp-json/wp/v2/{kind}/{page['id']}", {"title": value["title"], "excerpt": value["meta_description"], "content": markdown_to_html(value["body_markdown"])})
         return {"previous_value": previous_value}
 
-    async def _publish_page(self, client: AsyncSession, value: dict) -> dict:
+    async def _publish_page(self, client: AsyncSession, value: dict, created_ref: str | None = None, checkpoint: Checkpoint = no_checkpoint) -> dict:
+        if created_ref:
+            return {"previous_value": None, "created_ref": created_ref}  # a retry: the page already exists — never publish a duplicate
         created = await self._request(client, "POST", "/wp-json/wp/v2/pages", {"title": value["title"], "excerpt": value["meta_description"], "content": markdown_to_html(value["body_markdown"]), "status": "publish"})
+        await checkpoint({"created_ref": str(created["id"])})
         return {"previous_value": None, "created_ref": str(created["id"])}
 
-    async def _unpublish_page(self, client: AsyncSession, created_ref: str) -> dict:
+    async def _unpublish_page(self, client: AsyncSession, created_ref: str, checkpoint: Checkpoint = no_checkpoint) -> dict:
         page = await self._request(client, "GET", f"/wp-json/wp/v2/pages/{created_ref}?context=edit")
+        await checkpoint({"previous_value": page.get("status")})
         await self._request(client, "POST", f"/wp-json/wp/v2/pages/{created_ref}", {"status": "draft"})
         return {"previous_value": page.get("status")}
 

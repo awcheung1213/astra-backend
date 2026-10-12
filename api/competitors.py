@@ -10,7 +10,7 @@ brand-in-path must belong to the caller's org."""
 from fastapi import APIRouter, HTTPException, status
 
 from objects.brand import Brand
-from objects.competitor import Competitor
+from objects.competitor import SOURCE_USER, Competitor
 from schemas.competitor_schemas import CompetitorAddRequest, CompetitorItem, CompetitorListResponse, CompetitorRemoveResponse
 
 router = APIRouter(prefix="/api/v1")
@@ -33,7 +33,7 @@ async def add_competitor(brand_id: str, request: CompetitorAddRequest) -> Compet
     if Competitor.is_own_brand(brand.name, name):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="that's your own brand")
     # a client add un-excludes: the human overrides any earlier exclusion
-    competitor = await Competitor.upsert(brand.id, name, is_excluded=False)
+    competitor = await Competitor.upsert(brand.id, name, source=SOURCE_USER, is_excluded=False)
     return CompetitorItem.create({"id": competitor.id, "name": competitor.name, "is_active": competitor.is_active})
 
 

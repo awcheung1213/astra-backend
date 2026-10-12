@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 KIND_WIN = "win"
@@ -28,7 +29,7 @@ class Notification(SQLModel, BaseObject, table=True):
     link_ref: str | None = Field(default=None, sa_column=Column(String, nullable=True))  # deep link into the app (e.g. tasks/<id>)
     channels_sent: list = Field(default_factory=list, sa_column=Column(JSONB, nullable=False, server_default="[]"))
     read_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def create(

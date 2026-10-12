@@ -6,23 +6,24 @@ fan-out at birth for artifacts the brand's preset auto-approves. A human
 verdict here and an auto-approval there set the identical work in motion.
 
 Auth rides the router-level guard (utils/authz.py): the artifact/change set
-in the path must belong to the caller's org. reviewed_by still rides the
-request body (display name); the verified caller is request.state's user."""
+in the path must belong to the caller's org. reviewed_by is the verified
+caller (the guard's user id on request.state) — never a client-sent field."""
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
 from objects.artifact import STATUS_APPROVED, STATUS_PENDING_REVIEW, STATUS_REJECTED, Artifact
 from objects.change_set import STATUS_APPLIED, ChangeSet
 from objects.site import Site
 from schemas.approval_schemas import DECISION_APPROVE, DECISION_REJECT, RevertResponse, ReviewRequest, ReviewResponse
 from utils.approval_flow import create_and_dispatch_change_set, fan_out_approval, needs_site_connection
+from utils.authz import current_user
 from worker.tasks.changes import invert_operations
 
 router = APIRouter(prefix="/api/v1")
 
 
 @router.post("/artifacts/{artifact_id}/review", response_model=ReviewResponse)
-async def review_artifact(artifact_id: str, request: ReviewRequest) -> ReviewResponse:
+async def review_artifact(artifact_id: str, request: ReviewRequest, http_request: Request) -> ReviewResponse:
     """Approve or reject ONE pending artifact. 409 unless it is pending —
     verdicts are single-shot — and 409 on approving a site change while no
     site is connected (it would be recorded approved with nothing to apply and
@@ -31,14 +32,15 @@ async def review_artifact(artifact_id: str, request: ReviewRequest) -> ReviewRes
     cadence, e.g. rejected review-ask templates regenerate next sweep)."""
     if request.decision not in (DECISION_APPROVE, DECISION_REJECT):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="decision must be approve or reject")
-    artifact = await Artifact.get(artifact_id)
+    # row lock held to commit: concurrent verdicts serialize, the losers see the winner's status and 409 (one change set, one fan-out)
+    artifact = await Artifact.get_for_update(artifact_id)
     if artifact.status != STATUS_PENDING_REVIEW:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"artifact is {artifact.status}, not pending review")
     if request.decision == DECISION_APPROVE and await needs_site_connection(artifact.brand_id, artifact.type):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Connect your site before approving site changes — there is nothing to apply them to yet")
 
     verdict = STATUS_APPROVED if request.decision == DECISION_APPROVE else STATUS_REJECTED
-    artifact = await Artifact.review(artifact.id, status=verdict, reviewed_by=request.reviewed_by)
+    artifact = await Artifact.review(artifact.id, status=verdict, reviewed_by=current_user(http_request).id)
 
     queued_work: list[str] = []
     if verdict == STATUS_APPROVED:
@@ -53,7 +55,7 @@ async def revert_change_set(change_set_id: str) -> RevertResponse:
     The original is marked reverted and linked; the revert set reuses the
     original's artifact so provenance stays one story. 409 unless the set is
     applied and unreverted; 422 when an op has no rollback record to flip."""
-    original = await ChangeSet.get(change_set_id)
+    original = await ChangeSet.get_for_update(change_set_id)  # concurrent Undo clicks serialize: one revert set
     if original.status != STATUS_APPLIED or original.reverted_by_change_set_id is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"change set is {original.status}{' and already reverted' if original.reverted_by_change_set_id else ''} — only applied, unreverted sets revert")
 

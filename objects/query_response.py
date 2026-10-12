@@ -1,17 +1,28 @@
 import uuid
 from datetime import datetime, timedelta
 
-from objects.market import Market, SOURCE_NATIONAL
 from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select, tuple_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
-from utils.database import Database, ReplicaDatabase
 
 from objects.base_object import BaseObject
+from objects.market import SOURCE_NATIONAL, Market
+from utils import clock
+from utils.database import Database, ReplicaDatabase
 
 ENGINE_CHATGPT = "chatgpt"
 ENGINE_GEMINI = "gemini"
 ENGINE_CLAUDE = "claude"
+
+# Answers are stamped at INGEST (the poll after Thursday's submit, up to the providers' 24h
+# batch window + an hourly poll later), so a window equal to the 7-day cadence reads last
+# week's answers as fresh and collects every other week (BUG-046); 5 days = cadence - 2 days of slack.
+FRESHNESS_WINDOW = timedelta(days=5)
+
+
+def freshness_cutoff() -> datetime:
+    """Answers collected after this are fresh: reused, not re-collected."""
+    return clock.now() - FRESHNESS_WINDOW
 
 
 class QueryResponse(SQLModel, BaseObject, table=True):
@@ -30,11 +41,11 @@ class QueryResponse(SQLModel, BaseObject, table=True):
     # analysis materializes per-brand citation ROWS from this without re-collecting
     citations: list = Field(default_factory=list, sa_column=Column(JSONB, nullable=False, server_default="[]"))
     raw: dict = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False, server_default="{}"))
-    collected_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    collected_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def within_freshness_window(stale_cells: set[tuple[str, str]], engine: str) -> list["QueryResponse"]:
-        freshness_window_cutoff = datetime.now() - timedelta(days=7)
+        freshness_window_cutoff = freshness_cutoff()
         statement = (
             select(QueryResponse)
             .distinct(QueryResponse.query_hash, QueryResponse.market_id)

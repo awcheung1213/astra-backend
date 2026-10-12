@@ -5,6 +5,7 @@ from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text, func
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 
@@ -22,7 +23,7 @@ class Prompt(SQLModel, BaseObject, table=True):
     is_active: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
     # retiring stamps a date, history stays
     retired_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def create(brand_id: str, text: str, category: str, source: str = "generated", is_active: bool = False) -> "Prompt":

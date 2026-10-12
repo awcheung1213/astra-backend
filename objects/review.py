@@ -6,6 +6,7 @@ from sqlmodel import Field, SQLModel
 
 from exceptions.exceptions import ReviewNotFound
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 
@@ -23,7 +24,7 @@ class Review(SQLModel, BaseObject, table=True):
     # the drafted reply is an artifact; this row just points at it
     reply_artifact_id: str | None = Field(default=None, sa_column=Column(String, ForeignKey("artifacts.id"), nullable=True))
     replied_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def get(id: str) -> "Review":
@@ -54,7 +55,7 @@ class Review(SQLModel, BaseObject, table=True):
         review = await Database.session.get(Review, id)
         if review is None:
             raise ReviewNotFound()
-        review.replied_at = datetime.now()
+        review.replied_at = clock.now()
         Database.session.add(review)
         await Database.session.flush()
 

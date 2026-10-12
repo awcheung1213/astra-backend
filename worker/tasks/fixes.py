@@ -20,7 +20,6 @@ fixes at once; the approvals queue is the surface for pending proposals."""
 
 import json
 import re
-from datetime import datetime
 from urllib.parse import urlparse
 
 from sqlalchemy import select
@@ -31,12 +30,13 @@ from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, STATUS_PENDI
 from objects.brand import FOOTPRINT_LOCAL, Brand
 from objects.finding import STATUS_OPEN, Finding
 from objects.site import Site
+from utils import clock
 from utils.agent_prompts import ROLE_TECHNICAL, skills_for
 from utils.approval_flow import fan_out_approval, initial_artifact_status
 from utils.database import Database, ReplicaDatabase
 from utils.logger import logger
 from utils.site_fetch import fetch_page, fetch_page_html
-from utils.task_queue import create_task, task_lifecycle
+from utils.task_queue import RETRY_WITH_BACKOFF, create_task, task_lifecycle
 from worker.app import app
 from worker.tasks.changes import ADAPTER_BY_PLATFORM, native_field
 from worker.tasks.site_audit import KIND_MISSING_H1, KIND_MISSING_META_DESCRIPTION, KIND_MISSING_SCHEMA, KIND_MISSING_TITLE, page_facts, visible_text
@@ -51,7 +51,7 @@ PAGE_EXCERPT_CHARS = 4000  # how much page text rides a prompt / a fetch_url res
 GENERIC_FIELDS = ("title", "h1", "meta_description", "content")
 
 
-@app.task(name="technical_fix", queue="fixes", retry=2)
+@app.task(name="technical_fix", queue="fixes", retry=RETRY_WITH_BACKOFF)
 async def technical_fix(task_id: str, brand_id: str) -> None:
     """#9 — CHAINED, never cron: the site_audit runner emits ONE per audit
     carrying that run's new fixable finding ids (payload.finding_ids; the
@@ -64,13 +64,20 @@ async def technical_fix(task_id: str, brand_id: str) -> None:
             return
         brand = await Brand.get(brand_id)
         if settings.TECHNICAL_FIX_MODE == MODE_AGENT:
+            # dedup BEFORE the paid run: a finding with a live proposal or an
+            # earlier skip would only be re-bought and thrown away (BUG-049)
+            covered_ids = {finding.id for finding in findings if await _existing_proposal(brand.id, finding.id) is not None}
+            findings = findings_needing_agent(findings, covered_ids)
+            if not findings:
+                logger.info(f"[fixes] task {task_id}: every finding already has a live proposal or a skip — no agent run")
+                return
             await _run_agent(task_id, brand, findings)
             return
         for finding in findings:
             await _run_generator(task_id, brand, finding)
 
 
-@app.task(name="technical_judgment", queue="fixes", retry=2)
+@app.task(name="technical_judgment", queue="fixes", retry=RETRY_WITH_BACKOFF)
 async def technical_judgment(task_id: str, brand_id: str) -> None:
     """Generators mode only — CHAINED from technical_fix when no generator
     can derive the fix (payload carries finding_id). The Technical agent
@@ -122,7 +129,7 @@ def _finding_ids(payload: dict | None) -> list[str]:
 ##############################
 
 
-async def _create_proposal(task_id: str, brand: Brand, finding: Finding, operations: list[dict], evidence: dict) -> Artifact:
+async def _create_proposal(task_id: str, brand: Brand, finding: Finding, operations: list[dict], evidence: dict, display: dict | None = None) -> Artifact:
     """One change_proposal per finding, born per the brand's preset — an
     auto-approved one dispatches its change set right here, through the same
     fan-out a human click uses."""
@@ -131,7 +138,7 @@ async def _create_proposal(task_id: str, brand: Brand, finding: Finding, operati
         task_id=task_id,
         brand_id=brand.id,
         type="change_proposal",
-        content={"finding_id": finding.id, "kind": finding.kind, "operations": operations},
+        content={"finding_id": finding.id, "kind": finding.kind, "operations": operations, **({"display": display} if display else {})},
         evidence={"finding_summary": finding.summary, **evidence},
         status=artifact_status,
     )
@@ -149,6 +156,12 @@ async def _existing_proposal(brand_id: str, finding_id: str) -> Artifact | None:
     live_statuses = (STATUS_PENDING_REVIEW, STATUS_APPROVED, STATUS_AUTO_APPROVED)
     rows = await ReplicaDatabase.session.execute(select(Artifact).where(Artifact.brand_id == brand_id).where(Artifact.type == "change_proposal").where(Artifact.status.in_(live_statuses)).where(Artifact.content["finding_id"].astext == finding_id))  # type: ignore
     return rows.scalars().first()
+
+
+def findings_needing_agent(findings: list[Finding], covered_ids: set[str]) -> list[Finding]:
+    """The findings worth a paid agent turn: not already covered by a live
+    proposal (covered_ids) and not skipped by an earlier run. Pure."""
+    return [finding for finding in findings if finding.id not in covered_ids and not (finding.detail or {}).get("skipped")]
 
 
 async def _open_finding(finding_id: str) -> Finding | None:
@@ -175,6 +188,76 @@ async def _site_adapter(brand_id: str):
 
 class TokenBudgetExceeded(Exception):
     """The run's lifetime token budget (settings.TECHNICAL_FIX_TOKEN_BUDGET) is spent."""
+
+
+# What the business owner reads on the approval card — written by the agent
+# for a reader with zero web or SEO knowledge, stored on the artifact
+# (content.display), rendered verbatim by the UI (which holds no copy of its
+# own). The schema keeps every field narrow; the gate below refuses the call
+# when a technical word slips in, and the agent rewrites.
+DISPLAY_BANNED_TERMS = ("meta", "schema", "json", "ld", "json-ld", "excerpt", "markup", "tag", "tags", "block", "gutenberg", "html", "script", "field", "cms", "seo", "crawler", "index", "canonical")
+DISPLAY_VERBS = ("Add", "Set", "Update")
+DISPLAY_SCHEMA: dict = {
+    "type": "object",
+    "description": f"The approval card for the business owner, who knows nothing about websites or SEO. Plain everyday words only — these terms are refused: {', '.join(DISPLAY_BANNED_TERMS)}.",
+    "required": ["title", "changes"],
+    "properties": {
+        "title": {"type": "string", "maxLength": 80, "description": "A plain action on a plain page, e.g. 'Add a business card for search engines to your contact page'."},
+        "changes": {
+            "type": "array",
+            "minItems": 1,
+            "description": "One entry per operation, in the same order.",
+            "items": {
+                "type": "object",
+                "required": ["verb", "what", "why", "page", "shows"],
+                "properties": {
+                    "verb": {"type": "string", "enum": list(DISPLAY_VERBS)},
+                    "what": {"type": "string", "maxLength": 70, "description": "What this thing is to the owner, e.g. 'the short blurb under your link in search results'."},
+                    "why": {"type": "string", "maxLength": 160, "description": "One sentence on what it does for them, e.g. 'Without one, search engines make up their own.'"},
+                    "page": {"type": "string", "maxLength": 40, "description": "'your homepage', 'your contact page'."},
+                    "shows": {"type": "string", "maxLength": 300, "description": "The exact words a visitor or search engine will see, quoted verbatim from the new value (a name and a one-line description for a business card)."},
+                },
+            },
+        },
+    },
+}
+UNDO_LINE = "You can undo this from Work → Site changes at any time."
+
+
+def display_errors(display, operation_count: int) -> list[str]:
+    """Why a display block is refused: shape, lengths, count mismatch, or a
+    technical word in anything but the verbatim `shows` quote. Pure."""
+    if not isinstance(display, dict):
+        return ["display must be an object"]
+    errors: list[str] = []
+    title = display.get("title")
+    if not isinstance(title, str) or not title.strip():
+        errors.append("display.title is required")
+    elif len(title) > 80:
+        errors.append("display.title must be 80 characters or fewer")
+    changes = display.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return errors + ["display.changes must list one entry per operation"]
+    if len(changes) != operation_count:
+        errors.append(f"display.changes has {len(changes)} entries for {operation_count} operations")
+    limits = {"what": 70, "why": 160, "page": 40, "shows": 300}
+    for index, change in enumerate(changes):
+        if not isinstance(change, dict):
+            errors.append(f"display.changes[{index}] must be an object")
+            continue
+        if change.get("verb") not in DISPLAY_VERBS:
+            errors.append(f"display.changes[{index}].verb must be one of {', '.join(DISPLAY_VERBS)}")
+        for key, limit in limits.items():
+            value = change.get(key)
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"display.changes[{index}].{key} is required")
+            elif len(value) > limit:
+                errors.append(f"display.changes[{index}].{key} must be {limit} characters or fewer")
+    owner_text = " ".join([title if isinstance(title, str) else ""] + [str(change.get(key, "")) for change in changes if isinstance(change, dict) for key in ("what", "why", "page")])
+    found = sorted({word for word in re.findall(r"[A-Za-z][A-Za-z-]*", owner_text.lower()) if word in DISPLAY_BANNED_TERMS})
+    if found:
+        errors.append(f"technical words are not allowed on the owner's card: {', '.join(found)} — say it in everyday words")
+    return errors
 
 
 AGENT_TOOLS: list[dict] = [
@@ -206,9 +289,10 @@ AGENT_TOOLS: list[dict] = [
             "properties": {
                 "finding_id": {"type": "string"},
                 "operations": {"type": "array", "items": {"type": "object", "properties": {"field": {"type": "string"}, "url": {"type": "string"}, "value": {}}, "required": ["field", "url", "value"]}},
-                "rationale": {"type": "string", "description": "One or two sentences a client would read: what changes and the expected effect."},
+                "display": DISPLAY_SCHEMA,
+                "technical_note": {"type": "string", "description": "The precise engineering description for the record: field, mechanism, rollback path. Jargon welcome here."},
             },
-            "required": ["finding_id", "operations", "rationale"],
+            "required": ["finding_id", "operations", "display", "technical_note"],
         },
     },
     {
@@ -299,7 +383,11 @@ class _AgentRun:
             self.proposed.add(finding.id)
             return json.dumps({"artifact_id": existing.id, "status": existing.status, "note": "a proposal for this finding already exists"})
         operations = [{"field": operation["field"], "url": operation["url"], "value": operation["value"]} for operation in tool_input["operations"]]
-        artifact = await _create_proposal(self.task_id, self.brand, finding, operations, evidence={"rationale": tool_input.get("rationale", ""), "derived_from": "Technical agent"})
+        display_problems = display_errors(tool_input.get("display"), len(operations))
+        if display_problems:
+            raise ValueError("; ".join(display_problems))
+        display = {**tool_input["display"], "undo": UNDO_LINE}
+        artifact = await _create_proposal(self.task_id, self.brand, finding, operations, evidence={"technical_note": tool_input.get("technical_note", ""), "derived_from": "Technical agent"}, display=display)
         self.proposed.add(finding.id)
         return json.dumps({"artifact_id": artifact.id, "status": artifact.status})
 
@@ -307,7 +395,7 @@ class _AgentRun:
         finding = self._finding(tool_input.get("finding_id", ""))
         row = await Database.session.get(Finding, finding.id)
         if row is not None:
-            row.detail = {**(row.detail or {}), "skipped": {"reason": tool_input.get("reason", ""), "task_id": self.task_id, "at": datetime.now().isoformat()}}
+            row.detail = {**(row.detail or {}), "skipped": {"reason": tool_input.get("reason", ""), "task_id": self.task_id, "at": clock.now().isoformat()}}
             Database.session.add(row)
             await Database.session.flush()
         self.skipped.add(finding.id)
@@ -385,6 +473,7 @@ def _agent_prompt(brand: Brand, findings: list[Finding], platform: str | None, a
         "- A composite change (a JSON-LD block, a fixed link) is a full new value for the page's content field, composed from the current content you read.",
         "- Group all of a finding's operations into ONE propose_change. Never propose for a finding you were not given.",
         "- Copy in proposals is public and customer-facing: nothing internal, nothing the page does not support.",
+        "- The display block is the approval card the business owner reads; they know nothing about websites or SEO. Everyday words only (the tool refuses technical terms). The technical_note is where the engineering goes.",
         "- Finish with two or three sentences summarising what you proposed and what you skipped.",
     ]
     playbooks = skills_for(platform, kinds)

@@ -5,6 +5,7 @@ from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func
 from sqlmodel import Field, SQLModel, delete
 
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database
 from utils.urls import domain_from_url
 
@@ -19,7 +20,7 @@ class Citation(SQLModel, BaseObject, table=True):
     url: str = Field(sa_column=Column(Text, nullable=False))
     domain: str = Field(sa_column=Column(String, nullable=False, index=True))
     title: str | None = Field(default=None, sa_column=Column(String, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def create(

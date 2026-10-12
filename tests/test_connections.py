@@ -63,9 +63,9 @@ async def test_connect_verifies_stores_and_unblocks(client, monkeypatch):
     approvals = (await client.get(f"/api/v1/brands/{brand_id}/approvals")).json()
     assert "grant_access" not in {task["name"] for task in approvals["waiting_on_you"]}
 
-    # launch queued one audit; connect queued the second
+    # launch queued the one audit; connect queues none (the weekly schedule owns re-audits)
     worklog = (await client.get(f"/api/v1/brands/{brand_id}/worklog")).json()
-    assert len([task for task in worklog["queued"] if task["name"] == "site_audit"]) == 2
+    assert len([task for task in worklog["queued"] if task["name"] == "site_audit"]) == 1
 
     # stored credentials survive an encrypt/decrypt round-trip with the url normalized
     rows = await _site_rows(brand_id)

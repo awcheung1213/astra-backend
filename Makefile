@@ -33,7 +33,7 @@ shell: ## Shell into the evergreen-backend container
 
 
 .PHONY: tinker
-tinker: ## Atomic e2e run (tinker.py). Stops the live worker so tinker is the ONLY executor, restarts it after. args="--live --steps weekly ..."
+tinker: ## Run tinker.py, a scratch notebook of hand-run steps (uncomment one block; DEV DB, real APIs, no args). Stops the worker so tinker is the ONLY executor, restarts it after. For a zero-cost stubbed e2e run use evergreen-verification/harness/ev
 	clear
 	@echo Running tinker.py
 	@echo -------------------------------

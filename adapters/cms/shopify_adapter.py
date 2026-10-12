@@ -16,12 +16,13 @@ write the agent composes after READING the current body — no per-SEO-feature
 branches (agent-tools-plan.md Phase 1).
 
 Contract with the engine: every write READS the current value of the SAME
-field first and returns it as previous_value; anything created returns
-created_ref. Also carries the Technical agent's read primitives."""
+field first, checkpoints it BEFORE writing, and returns it as previous_value;
+anything created checkpoints + returns created_ref, and a publish whose op
+already carries a created_ref never creates the page again. Also carries the Technical agent's read primitives."""
 
 import httpx
 
-from adapters.cms.common import WRITE_TIMEOUT_SECONDS, CmsWriteError, markdown_to_html, path_slug
+from adapters.cms.common import WRITE_TIMEOUT_SECONDS, Checkpoint, CmsWriteError, markdown_to_html, no_checkpoint, path_slug
 from objects.site import Site
 from utils.token_crypto import decrypt_credentials
 
@@ -57,18 +58,18 @@ class ShopifyAdapter:
         async with httpx.AsyncClient(timeout=WRITE_TIMEOUT_SECONDS) as client:
             await self._request(client, "GET", "/shop.json")
 
-    async def apply(self, operation: dict) -> dict:
+    async def apply(self, operation: dict, checkpoint: Checkpoint = no_checkpoint) -> dict:
         async with httpx.AsyncClient(timeout=WRITE_TIMEOUT_SECONDS) as client:
             if operation["op"] == "publish_page":
-                return await self._publish_page(client, operation["value"])
+                return await self._publish_page(client, operation["value"], operation.get("created_ref"), checkpoint)
             if operation["op"] == "unpublish_page":
-                return await self._unpublish_page(client, operation["target"])
+                return await self._unpublish_page(client, operation["target"], checkpoint)
 
             page = await self._page_for_url(client, operation["target"])
             if operation["op"] == "update_page":
-                return await self._update_page(client, page, operation["value"])
+                return await self._update_page(client, page, operation["value"], checkpoint)
             if operation["op"] == "set_field":
-                return await self._set_field(client, page, operation["field"], operation["value"])
+                return await self._set_field(client, page, operation["field"], operation["value"], checkpoint)
             raise CmsWriteError(f"shopify adapter does not know operation {operation['op']!r}")
 
     ##############################
@@ -101,27 +102,35 @@ class ShopifyAdapter:
     # OPERATIONS
     ##############################
 
-    async def _set_field(self, client: httpx.AsyncClient, page: dict, field: str, value) -> dict:
+    async def _set_field(self, client: httpx.AsyncClient, page: dict, field: str, value, checkpoint: Checkpoint = no_checkpoint) -> dict:
         native = self.resolve_field(field)
         if native == "meta_description":
-            return await self._set_description_metafield(client, page, value)
+            return await self._set_description_metafield(client, page, value, checkpoint)
         previous_value = page.get(native) or ""
+        await checkpoint({"previous_value": previous_value})
         await self._request(client, "PUT", f"/pages/{page['id']}.json", {"page": {"id": page["id"], native: value}})
         return {"previous_value": previous_value}
 
-    async def _update_page(self, client: httpx.AsyncClient, page: dict, value: dict) -> dict:
-        description_result = await self._set_description_metafield(client, page, value["meta_description"])
-        previous_value = {"title": page.get("title"), "meta_description": description_result["previous_value"], "body_markdown": page.get("body_html") or ""}
+    async def _update_page(self, client: httpx.AsyncClient, page: dict, value: dict, checkpoint: Checkpoint = no_checkpoint) -> dict:
+        # read BOTH slots and checkpoint before either write
+        metafield = await self._description_metafield(client, page)
+        previous_value = {"title": page.get("title"), "meta_description": (metafield or {}).get("value"), "body_markdown": page.get("body_html") or ""}
+        await checkpoint({"previous_value": previous_value})
+        await self._write_description_metafield(client, page, metafield, value["meta_description"])
         await self._request(client, "PUT", f"/pages/{page['id']}.json", {"page": {"id": page["id"], "title": value["title"], "body_html": markdown_to_html(value["body_markdown"])}})
         return {"previous_value": previous_value}
 
-    async def _publish_page(self, client: httpx.AsyncClient, value: dict) -> dict:
-        created = await self._request(client, "POST", "/pages.json", {"page": {"title": value["title"], "body_html": markdown_to_html(value["body_markdown"]), "published": True}})
-        created_page = created["page"]
+    async def _publish_page(self, client: httpx.AsyncClient, value: dict, created_ref: str | None = None, checkpoint: Checkpoint = no_checkpoint) -> dict:
+        if created_ref:
+            created_page = {"id": int(created_ref)}  # a retry: the page already exists — finish its metafield, never create a duplicate
+        else:
+            created_page = (await self._request(client, "POST", "/pages.json", {"page": {"title": value["title"], "body_html": markdown_to_html(value["body_markdown"]), "published": True}}))["page"]
+            await checkpoint({"created_ref": str(created_page["id"])})  # before the metafield write, which can fail and retry
         await self._set_description_metafield(client, created_page, value["meta_description"])
         return {"previous_value": None, "created_ref": str(created_page["id"])}
 
-    async def _unpublish_page(self, client: httpx.AsyncClient, created_ref: str) -> dict:
+    async def _unpublish_page(self, client: httpx.AsyncClient, created_ref: str, checkpoint: Checkpoint = no_checkpoint) -> dict:
+        await checkpoint({"previous_value": "published"})
         await self._request(client, "PUT", f"/pages/{created_ref}.json", {"page": {"id": int(created_ref), "published": False}})
         return {"previous_value": "published"}
 
@@ -143,17 +152,20 @@ class ShopifyAdapter:
         metafields = existing.get("metafields") or []
         return metafields[0] if metafields else None
 
-    async def _set_description_metafield(self, client: httpx.AsyncClient, page: dict, value: str) -> dict:
+    async def _set_description_metafield(self, client: httpx.AsyncClient, page: dict, value: str, checkpoint: Checkpoint = no_checkpoint) -> dict:
         """global.description_tag is Shopify's meta-description slot; read the
         existing metafield first so the previous value survives for revert."""
         metafield = await self._description_metafield(client, page)
+        previous_value = (metafield or {}).get("value")
+        await checkpoint({"previous_value": previous_value})
+        await self._write_description_metafield(client, page, metafield, value)
+        return {"previous_value": previous_value}
+
+    async def _write_description_metafield(self, client: httpx.AsyncClient, page: dict, metafield: dict | None, value: str) -> None:
         if metafield:
-            previous_value = metafield.get("value")
             await self._request(client, "PUT", f"/metafields/{metafield['id']}.json", {"metafield": {"id": metafield["id"], "value": value, "type": "single_line_text_field"}})
         else:
-            previous_value = None
             await self._request(client, "POST", f"/pages/{page['id']}/metafields.json", {"metafield": {"namespace": "global", "key": "description_tag", "value": value, "type": "single_line_text_field"}})
-        return {"previous_value": previous_value}
 
     async def _fetch_access_token(self, client: httpx.AsyncClient) -> str:
         """Client-credentials grant: id/secret -> a 24h Admin API token,

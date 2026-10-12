@@ -260,8 +260,11 @@ class GeminiService:
         candidates = getattr(response, "candidates", None) or []
         grounding = getattr(candidates[0], "grounding_metadata", None) if candidates else None
         searches = len((grounding.web_search_queries or []) if grounding else [])
+        # cached_content_token_count is a subset of prompt_token_count: split it out, Anthropic-style (BUG-053)
+        cached = getattr(usage, "cached_content_token_count", None) or 0
         return {
-            "input_tokens": usage.prompt_token_count or 0,
+            "input_tokens": (usage.prompt_token_count or 0) - cached,
+            "cache_read_input_tokens": cached,
             "output_tokens": usage.candidates_token_count or 0,
             "server_tool_use": {"web_search_requests": searches},
         }

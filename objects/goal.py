@@ -6,6 +6,7 @@ from sqlalchemy import Column, Date, DateTime, ForeignKey, Numeric, String, func
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import ReplicaDatabase
 
 METRIC_LEADS = "leads"
@@ -21,7 +22,7 @@ class Goal(SQLModel, BaseObject, table=True):
     target: Decimal = Field(sa_column=Column(Numeric(14, 2), nullable=False))
     deadline: date | None = Field(default=None, sa_column=Column(Date, nullable=True))
     retired_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def active(brand_id: str) -> list["Goal"]:

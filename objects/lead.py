@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import ReplicaDatabase
 
 KIND_CALL = "call"
@@ -29,7 +30,7 @@ class Lead(SQLModel, BaseObject, table=True):
     landing_path: str | None = Field(default=None, sa_column=Column(String, nullable=True, index=True))
     occurred_at: datetime = Field(sa_column=Column(DateTime, nullable=False))
     meta: dict = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False, server_default="{}"))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def for_brand(brand_id: str, limit: int = 100) -> list["Lead"]:

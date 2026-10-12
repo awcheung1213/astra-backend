@@ -2,14 +2,14 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func, select
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Index, Integer, Numeric, String, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Field, SQLModel
-from utils.database import Database, ReplicaDatabase
+
 from exceptions.exceptions import MarketNotFound
-
 from objects.base_object import BaseObject
-
+from utils import clock
+from utils.database import Database, ReplicaDatabase
 
 SOURCE_SYSTEM = "system"
 SOURCE_ADHOC = "adhoc"
@@ -26,11 +26,11 @@ class Market(SQLModel, BaseObject, table=True):
 
     Census columns justify market selection from data (population x county GDP
     picks the 150-market national sample); census_year makes staleness visible.
-    No boundary geometry until a map view returns.
+    No boundary geometry until a map view returns. Uniqueness is on
+    (lower(city), lower(state)) so 'Mesa' and 'mesa' can't both land.
     """
 
     __tablename__ = "markets"
-    __table_args__ = (UniqueConstraint("city", "state"),)
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     city: str
@@ -44,7 +44,7 @@ class Market(SQLModel, BaseObject, table=True):
     population: int | None = Field(default=None, sa_column=Column(BigInteger, nullable=True))
     county_gdp: Decimal | None = Field(default=None, sa_column=Column(Numeric(16, 0), nullable=True))
     census_year: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def get(id: str) -> "Market":
@@ -72,7 +72,7 @@ class Market(SQLModel, BaseObject, table=True):
     async def get_or_create_city(city: str, state: str) -> "Market":
         """ONE row per physical city (the corpus dedup invariant), three
         layers deep: case-insensitive lookup first (keeping the existing
-        row's canonical casing), the (city, state) unique constraint as the
+        row's canonical casing), the case-insensitive unique index as the
         backstop, and a savepoint so a concurrent-create race is caught and
         re-fetched instead of poisoning the request's transaction."""
         city, state = city.strip(), state.strip().upper()
@@ -94,3 +94,7 @@ class Market(SQLModel, BaseObject, table=True):
     async def _by_city_state(city: str, state: str) -> "Market | None":
         rows = await Database.session.execute(select(Market).where(func.lower(Market.city) == city.lower(), func.lower(Market.state) == state.lower()))
         return rows.scalars().first()
+
+
+# the one-row-per-city backstop, case-insensitive (supersedes the old case-sensitive UNIQUE (city, state))
+Index("uq_markets_lower_city_state", func.lower(Market.__table__.c.city), func.lower(Market.__table__.c.state), unique=True)

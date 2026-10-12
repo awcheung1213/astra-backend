@@ -8,16 +8,16 @@ from adapters.gbp_adapter import GBPAdapter
 from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, STATUS_PENDING_REVIEW, Artifact
 from objects.brand import Brand
 from objects.connection import Connection
-from objects.notification import KIND_ALERT, Notification
+from objects.notification import KIND_ALERT, URGENCY_URGENT, Notification
 from objects.review import Review
 from utils.agent_json import parse_agent_json
 from utils.agent_prompts import ROLE_REPUTATION
 from utils.logger import logger
-from utils.task_queue import task_lifecycle
+from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
 
 
-@app.task(name="gbp_management", queue="reputation", retry=2)
+@app.task(name="gbp_management", queue="reputation", retry=RETRY_WITH_BACKOFF)
 async def gbp_management(task_id: str, brand_id: str) -> None:
     """#14 — weekly GBP touches: posts drafted in brand voice -> ONE
     gbp_touches artifact behind the tone gate; approval chains gbp_apply.
@@ -48,7 +48,7 @@ async def gbp_management(task_id: str, brand_id: str) -> None:
         logger.info(f"[reputation] brand {brand.id}: {len(touches['posts'])} posts drafted for review")
 
 
-@app.task(name="review_asks", queue="reputation", retry=2)
+@app.task(name="review_asks", queue="reputation", retry=RETRY_WITH_BACKOFF)
 async def review_asks(task_id: str, brand_id: str) -> None:
     """#15 — review generation: the ASKS are ours; the reviews are
     structurally the client's customers to give. v1 maintains the brand's ask
@@ -85,7 +85,7 @@ async def review_asks(task_id: str, brand_id: str) -> None:
         logger.info(f"[reputation] brand {brand.id}: review-ask templates drafted for review")
 
 
-@app.task(name="review_response", queue="reputation", retry=2)
+@app.task(name="review_response", queue="reputation", retry=RETRY_WITH_BACKOFF)
 async def review_response(task_id: str, brand_id: str) -> None:
     """#14 (the reply half) — CHAINED from the review webhook (payload carries
     review_id); fast reply is the point. Every review gets a drafted reply in
@@ -124,10 +124,10 @@ async def review_response(task_id: str, brand_id: str) -> None:
             await Artifact.create(task_id=task_id, brand_id=brand.id, type="flag_request", content={"review_id": review.id, "platform": review.platform, "external_id": review.external_id, **policy_violation})
 
         if review.rating <= NEGATIVE_RATING_MAX:
-            await Notification.create(organization_id=brand.organization_id, kind=KIND_ALERT, title="A negative review needs your attention", body=f"{review.rating}-star on {review.platform} — a reply is drafted for your approval.", link_ref=f"artifacts/{reply_artifact.id}")
+            await Notification.create(organization_id=brand.organization_id, kind=KIND_ALERT, urgency=URGENCY_URGENT, title="A negative review needs your attention", body=f"{review.rating}-star on {review.platform} — a reply is drafted for your approval.", link_ref=f"artifacts/{reply_artifact.id}")
 
 
-@app.task(name="gbp_apply", queue="reputation", retry=2)
+@app.task(name="gbp_apply", queue="reputation", retry=RETRY_WITH_BACKOFF)
 async def gbp_apply(task_id: str, brand_id: str) -> None:
     """CHAINED from the approval endpoint (payload carries artifact_id): puts
     an APPROVED gbp_touches or reply artifact live via the GBP adapter.

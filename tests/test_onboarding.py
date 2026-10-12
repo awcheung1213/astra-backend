@@ -66,7 +66,7 @@ async def test_launch_after_interview_skips_the_answered_interview(client, monke
     assert "answer_sme_interview" not in body["client_tasks"]
     assert "grant_access" in body["client_tasks"]
     # the research pair is the interview's — launch only ever adds its own work
-    assert body["queued_work"] == ["plan_update", "site_audit"]
+    assert body["queued_work"] == ["site_audit"]  # the first plan waits for the audit + research (utils/first_plan.py)
 
     goals = (await client.get(f"/api/v1/brands/{brand_id}/roadmap")).json()["goals"]
     assert goals and goals[0]["metric"] == "revenue" and goals[0]["target"] == 120000
@@ -88,7 +88,7 @@ async def test_skipped_interview_waits_and_the_late_answer_fires_research(client
     body = response.json()
     assert "answer_sme_interview" in body["client_tasks"]
     # research strictly waits for the interview it grounds in
-    assert body["queued_work"] == ["plan_update", "site_audit"]
+    assert body["queued_work"] == ["site_audit"]
 
     # answering later (from Tasks) closes the chase row and fires research
     assert (await _interview(client, brand_id)).status_code == 200

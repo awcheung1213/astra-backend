@@ -7,6 +7,7 @@ from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
 from objects.site import STATUS_CONNECTED, STATUS_PENDING
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 
@@ -25,7 +26,7 @@ class Connection(SQLModel, BaseObject, table=True):
     credentials_encrypted: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     meta: dict = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False, server_default="{}"))
     connected_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def connected_for_brand(brand_id: str) -> list["Connection"]:
@@ -51,7 +52,7 @@ class Connection(SQLModel, BaseObject, table=True):
         connection.status = status
         connection.credentials_encrypted = credentials_encrypted
         if status == STATUS_CONNECTED:
-            connection.connected_at = datetime.now()
+            connection.connected_at = clock.now()
         Database.session.add(connection)
         await Database.session.flush()
         return connection

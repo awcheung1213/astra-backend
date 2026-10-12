@@ -12,6 +12,7 @@ from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, func, sele
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 ROLE_ADMIN = "admin"  # the only role today — every user claims their own org; more roles arrive with an invite flow
@@ -27,7 +28,7 @@ class User(SQLModel, BaseObject, table=True):
     role: str = ROLE_ADMIN
     phone: str | None = Field(default=None, sa_column=Column(String, nullable=True))
     sms_urgent_enabled: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def get_by_sub(supabase_user_id: str) -> "User | None":

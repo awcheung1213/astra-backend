@@ -1,7 +1,12 @@
 """We insert the Task row manually and call the runner's .func directly so this
 script is the ONLY executor: create_task() would also enqueue a queue job,
 and the live worker container would pick that up and run the brief a second
-time (double Anthropic spend)."""
+time (double Anthropic spend).
+
+A scratch notebook, not a driver: every step block stays commented out;
+uncomment one, run it, re-comment it. Nothing is stubbed here and it runs on
+the DEV DB (step 30 writes to the connected live site). For a $0 end-to-end
+run use the verification harness (evergreen-verification/harness/ev)."""
 
 import asyncio
 
@@ -69,6 +74,7 @@ INTERVIEW_ANSWERS = {
 
 
 async def tinker() -> None:
+    pass  # every step is commented out: uncomment ONE block below, run it, re-comment it
     # await seed()
 
     # # ---- step 1: interview (#2) ---------------------------------------    $
@@ -185,17 +191,17 @@ async def tinker() -> None:
     #         await Database.session.commit()
     # print(f"29. change_proposal approved -> queued_work={verdict.queued_work}")
 
-    # ---- step 30: change_set_apply — the ONLY thing that touches the client's site   $0
-    # Output:
-    #   change_sets         UPDATE status=applying; per op UPDATE completed + rollback record (resumable); UPDATE status=applied, applied_at
-    #   client site         WordPress / Shopify write via adapters/cms — meta, schema, content, publish
-    #   notifications       INSERT 1 row: "Approved changes were applied to your site"
-    #   (never live-tested; needs step 37 first)
-    async with ReplicaDatabase().connection():
-        async with Database().connection():
-            brand = (await Database.session.execute(select(Brand).where(Brand.name == TEST_BRAND_NAME))).scalars().first()
-            row = await Task.first_queued(brand.id, "change_set_apply")
-    await change_set_apply.func(task_id=row.id, brand_id=brand.id)
+    # # ---- step 30: change_set_apply — the ONLY thing that touches the client's site   $0
+    # # Output:
+    # #   change_sets         UPDATE status=applying; per op UPDATE completed + rollback record (resumable); UPDATE status=applied, applied_at
+    # #   client site         WordPress / Shopify write via adapters/cms — meta, schema, content, publish
+    # #   notifications       INSERT 1 row: "Approved changes were applied to your site"
+    # #   (never live-tested; needs step 37 first)
+    # async with ReplicaDatabase().connection():
+    #     async with Database().connection():
+    #         brand = (await Database.session.execute(select(Brand).where(Brand.name == TEST_BRAND_NAME))).scalars().first()
+    #         row = await Task.first_queued(brand.id, "change_set_apply")
+    # await change_set_apply.func(task_id=row.id, brand_id=brand.id)
 
     # # ---- step 31: revert a change set ------------------------------------
     # # Output:

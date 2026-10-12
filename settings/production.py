@@ -23,3 +23,6 @@ SUPABASE_PUBLISHABLE_KEY = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "")
 # no test-runner credentials in production on purpose
 TEST_RUNNER_EMAIL = ""
 TEST_RUNNER_PASSWORD = ""
+
+# --- review webhook HMAC (X-Evergreen-Signature); required — the webhook's only auth ---
+WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]

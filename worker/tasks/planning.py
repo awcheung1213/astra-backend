@@ -4,25 +4,27 @@ plan. Both write over assembler-supplied facts — the numbers come from the
 database, never the agent."""
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import timedelta
 
 from adapters.agents.claude_agent import ClaudeAgent
 from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, Artifact
 from objects.brand import Brand
 from objects.change_set import ChangeSet
+from objects.competitor import Competitor
 from objects.finding import Finding
 from objects.goal import Goal
 from objects.metric_point import MetricPoint
 from objects.notification import KIND_UPDATE, Notification
 from objects.visibility_run import VisibilityRun
+from utils import clock
 from utils.agent_json import parse_agent_json
 from utils.agent_prompts import ROLE_ANALYST, ROLE_STRATEGIST
-from utils.task_queue import task_lifecycle
+from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
-from worker.tasks.briefs import completed_task_counts
+from worker.tasks.briefs import change_set_outcome, completed_task_counts, work_facts
 
 
-@app.task(name="plan_update", queue="planning", retry=2)
+@app.task(name="plan_update", queue="planning", retry=RETRY_WITH_BACKOFF)
 async def plan_update(task_id: str, brand_id: str) -> None:
     """#24 (quarterly trigger) / #8 (first run, fired by onboarding) — the
     Strategist: goals + the latest diagnosis + the quarter's trajectory ->
@@ -50,10 +52,11 @@ async def plan_update(task_id: str, brand_id: str) -> None:
             raise ValueError(f"plan output is missing summary or named workstreams: {agent_output[:200]}")
 
         artifact = await Artifact.create(task_id=task_id, brand_id=brand.id, type="plan", content=plan, evidence=facts)
+        await Artifact.supersede_pending(brand.id, type="plan", keep_id=artifact.id)  # DEC-018: one roadmap waits for review, the newest
         await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title="Your new roadmap is ready for review", link_ref=f"artifacts/{artifact.id}")
 
 
-@app.task(name="diagnosis", queue="planning", retry=2)
+@app.task(name="diagnosis", queue="planning", retry=RETRY_WITH_BACKOFF)
 async def diagnosis(task_id: str, brand_id: str) -> None:
     """#23 — CHAINED from alert_detection on an update-shaped drop (payload
     carries the trigger + its evidence; the Ask endpoint will emit these too).
@@ -98,8 +101,9 @@ QUARTER_DAYS = 90
 
 async def _assemble_plan_facts(brand: Brand) -> dict:
     """Everything the roadmap may steer by — assembled here, never by the agent."""
-    today = date.today()
+    today = clock.today()
     quarter_start = today - timedelta(days=QUARTER_DAYS)
+    quarter_start_at = clock.now() - timedelta(days=QUARTER_DAYS)
 
     latest_diagnosis = await Artifact.latest(brand.id, type="diagnosis")
     current_plan = await Artifact.latest(brand.id, type="plan", statuses=[STATUS_APPROVED, STATUS_AUTO_APPROVED])
@@ -116,7 +120,10 @@ async def _assemble_plan_facts(brand: Brand) -> dict:
         "visibility_trend": [{"week_of": run.week_of.isoformat(), "overall_score": run.overall_score} for run in reversed(await VisibilityRun.latest(brand.id, limit=PLAN_TREND_WEEKS))],
         "quarter_metrics": await MetricPoint.totals_for_period(brand.id, quarter_start, today) or "no metrics ingested yet",
         "site_health": {"open_findings_by_kind": open_finding_counts_by_kind},
-        "work_shipped_this_quarter": await completed_task_counts(brand.id, since=datetime.now() - timedelta(days=QUARTER_DAYS)),
+        # the tracked rivals by name — without them a "[competitor] alternative"
+        # workstream is a placeholder the calendar and drafts inherit (e2e 2026-09-15, gap 5)
+        "competitors": [competitor.name for competitor in await Competitor.get_competitors_by_brand_id(brand.id)] or "none tracked yet",
+        "work_this_quarter": await work_facts(brand.id, await completed_task_counts(brand.id, since=quarter_start_at), await ChangeSet.for_brand(brand.id), since=quarter_start_at),
     }
 
 
@@ -125,7 +132,10 @@ def _plan_prompt(brand: Brand, facts: dict) -> str:
         f"Write the brand's roadmap for the next quarter: at most {PLAN_MAX_WORKSTREAMS} named workstreams,\n"
         "sequenced (what happens first, what waits), each tied to the evidence in the facts. Revise the\n"
         "current plan rather than starting over — keep what is working, and be explicit about what to STOP.\n"
-        "Use ONLY the facts provided; where data is missing, plan from brand context and say so.\n\n"
+        "Use ONLY the facts provided; where data is missing, plan from brand context and say so.\n"
+        "Every string is read by the business owner on their Roadmap page: write in a calm, plain voice —\n"
+        "no capitalised shouting (write 'Stop', never 'STOP'), no internal labels such as 'WS1' or 'WS4'\n"
+        "(name the workstream instead), and each first_moves / stop_doing entry is one short, self-contained item.\n\n"
         "Respond with ONLY a JSON object, no prose and no code fences:\n"
         '{"summary_markdown": "the plan narrative, for the owner",\n'
         ' "workstreams": [{"name": "...", "why": "tied to a fact", "expected_impact": "...", "effort": "low|medium|high", "first_moves": ["..."],\n'
@@ -149,8 +159,8 @@ def _plan_prompt(brand: Brand, facts: dict) -> str:
 async def assemble_diagnosis_facts(brand: Brand, trigger: str, trigger_evidence: dict) -> dict:
     """The timeline the Analyst reasons over — assembled here, never by the
     agent. Everything is dated so causal claims can carry receipts."""
-    today = date.today()
-    recent_cutoff = datetime.now() - timedelta(days=RECENT_WINDOW_DAYS)
+    today = clock.today()
+    recent_cutoff = clock.now() - timedelta(days=RECENT_WINDOW_DAYS)
 
     weekly_metrics = []
     for weeks_back in range(TIMELINE_WEEKS, 0, -1):
@@ -161,10 +171,13 @@ async def assemble_diagnosis_facts(brand: Brand, trigger: str, trigger_evidence:
     open_findings = await Finding.open_for_brand(brand.id)
     resolved_findings = await Finding.resolved_since(brand.id, since=today - timedelta(days=RECENT_WINDOW_DAYS))
 
-    # "what did WE change right before the drop" is the diagnosis's sharpest question
+    # "what did WE change right before the drop" is the diagnosis's sharpest question;
+    # each entry says whether it is still live, was undone, or IS an undo (BUG-050)
+    change_sets = await ChangeSet.for_brand(brand.id)
+    revert_set_ids = {change_set.reverted_by_change_set_id for change_set in change_sets if change_set.reverted_by_change_set_id}
     changes_applied = [
-        {"applied_at": change_set.applied_at.isoformat(), "operations": [{"op": operation["op"], "field": operation.get("field"), "target": operation.get("target")} for operation in change_set.operations]}
-        for change_set in await ChangeSet.for_brand(brand.id)
+        {"applied_at": change_set.applied_at.isoformat(), "what": change_set_outcome(change_set, revert_set_ids), "operations": [{"op": operation["op"], "field": operation.get("field"), "target": operation.get("target")} for operation in change_set.operations]}
+        for change_set in change_sets
         if change_set.applied_at and change_set.applied_at > recent_cutoff
     ]
     return {
@@ -176,7 +189,7 @@ async def assemble_diagnosis_facts(brand: Brand, trigger: str, trigger_evidence:
             "resolved_recently": [{"kind": finding.kind, "summary": finding.summary} for finding in resolved_findings],
         },
         "changes_applied_recently": changes_applied,
-        "work_shipped_recently": await completed_task_counts(brand.id, since=recent_cutoff),
+        "work_recently": await work_facts(brand.id, await completed_task_counts(brand.id, since=recent_cutoff), change_sets, since=recent_cutoff),
     }
 
 

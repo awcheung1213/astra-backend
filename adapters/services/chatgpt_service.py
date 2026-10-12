@@ -165,6 +165,10 @@ class ChatGPTService:
             # openai has no per-tool max_uses; max_tool_calls caps built-in tool
             # calls for the whole request, which is equivalent with one tool
             params["max_tool_calls"] = self.max_web_searches
+            # DEC-023: gpt-5.4-nano on "auto" answered local questions without
+            # searching (0 citations); "required" forces the (only) tool, so
+            # every answer is grounded like claude/gemini (~+$0.01/answer)
+            params["tool_choice"] = "required"
         return params
 
     def _web_search_tool(self, location: LocationContext | None) -> dict:
@@ -228,8 +232,11 @@ class ChatGPTService:
         if usage is None:
             return None
         searches = sum(1 for item in body.get("output") or [] if item.get("type") == "web_search_call")
+        # cached_tokens is a subset of input_tokens: split it out, Anthropic-style (BUG-053)
+        cached = (usage.get("input_tokens_details") or {}).get("cached_tokens") or 0
         return {
-            "input_tokens": usage.get("input_tokens") or 0,
+            "input_tokens": (usage.get("input_tokens") or 0) - cached,
+            "cache_read_input_tokens": cached,
             "output_tokens": usage.get("output_tokens") or 0,
             "server_tool_use": {"web_search_requests": searches},
         }

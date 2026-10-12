@@ -21,3 +21,6 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_PUBLISHABLE_KEY = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "")
 TEST_RUNNER_EMAIL = os.environ.get("TEST_RUNNER_EMAIL", "")
 TEST_RUNNER_PASSWORD = os.environ.get("TEST_RUNNER_PASSWORD", "")
+
+# --- review webhook HMAC (X-Evergreen-Signature); unset = every delivery 401s (fails CLOSED) ---
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")

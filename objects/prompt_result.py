@@ -1,11 +1,14 @@
 import uuid
 from datetime import datetime, timedelta
-from exceptions.exceptions import PromptResultNotFound
+
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, case, func, select, text, update
 from sqlmodel import Field, SQLModel, delete
-from utils.database import Database, ReplicaDatabase
 
+from exceptions.exceptions import PromptResultNotFound
 from objects.base_object import BaseObject
+from objects.query_response import freshness_cutoff
+from utils import clock
+from utils.database import Database, ReplicaDatabase
 
 SENTIMENT_POSITIVE = "positive"
 SENTIMENT_NEUTRAL = "neutral"
@@ -32,7 +35,7 @@ class PromptResult(SQLModel, BaseObject, table=True):
     brand_cited: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
     sentiment: str | None = Field(default=None, sa_column=Column(String, nullable=True))  # positive | neutral | negative
     analyzed_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def get(id: str) -> "PromptResult":
@@ -48,7 +51,7 @@ class PromptResult(SQLModel, BaseObject, table=True):
         market_ids: list[str] | None = None,
         contains_sentiment_analysis: bool | None = None,
     ) -> list["PromptResult"]:
-        horizon = datetime.now() - timedelta(days=7)
+        horizon = clock.now() - timedelta(days=7)
         statement = (
             select(PromptResult)
             .distinct(PromptResult.prompt_id, PromptResult.market_id, PromptResult.engine)  # type: ignore
@@ -78,7 +81,7 @@ class PromptResult(SQLModel, BaseObject, table=True):
             raise PromptResultNotFound()
         prompt_result.rank = rank
         prompt_result.sentiment = sentiment
-        prompt_result.analyzed_at = datetime.now()
+        prompt_result.analyzed_at = clock.now()
         session = Database.session
         session.add(prompt_result)
         await session.flush()
@@ -104,7 +107,7 @@ class PromptResult(SQLModel, BaseObject, table=True):
 
     @staticmethod
     async def within_freshness_window(brand_id: str, engine: str) -> list["PromptResult"]:
-        freshness_window_cutoff = datetime.now() - timedelta(days=7)
+        freshness_window_cutoff = freshness_cutoff()
         statement = (
             select(PromptResult)
             .distinct(PromptResult.prompt_id, PromptResult.market_id)  # type: ignore

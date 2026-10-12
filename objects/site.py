@@ -7,6 +7,8 @@ from sqlmodel import Field, SQLModel
 
 from exceptions.exceptions import SiteNotFound
 from objects.base_object import BaseObject
+from objects.brand import Brand
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 STATUS_PENDING = "pending"
@@ -28,7 +30,7 @@ class Site(SQLModel, BaseObject, table=True):
     scopes: list = Field(default_factory=list, sa_column=Column(JSONB, nullable=False, server_default="[]"))
     connected_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
     last_verified_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def get(id: str) -> "Site":
@@ -39,8 +41,11 @@ class Site(SQLModel, BaseObject, table=True):
 
     @staticmethod
     async def connected() -> list["Site"]:
-        """Only connected sites receive audits/change sets."""
-        rows = await ReplicaDatabase.session.execute(select(Site).where(Site.status == STATUS_CONNECTED))
+        """Connected sites of LAUNCHED brands — the weekly audit's fan-out. A site
+        connected mid-wizard gets its first audit from launch, never from cron
+        (AC-L19: an abandoned signup generates no paid work)."""
+        statement = select(Site).join(Brand, Brand.id == Site.brand_id).where(Site.status == STATUS_CONNECTED).where(Brand.onboarded_at.is_not(None))  # type: ignore
+        rows = await ReplicaDatabase.session.execute(statement)
         return list(rows.scalars().all())
 
     @staticmethod
@@ -65,8 +70,8 @@ class Site(SQLModel, BaseObject, table=True):
         site.status = status
         site.credentials_encrypted = credentials_encrypted
         if status == STATUS_CONNECTED:
-            site.connected_at = datetime.now()
-            site.last_verified_at = datetime.now()
+            site.connected_at = clock.now()
+            site.last_verified_at = clock.now()
         Database.session.add(site)
         await Database.session.flush()
         return site

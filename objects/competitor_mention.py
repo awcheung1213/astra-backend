@@ -6,6 +6,7 @@ from sqlmodel import Field, SQLModel, delete, func
 
 from exceptions.exceptions import CompetitorMentionNotFound
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 
@@ -26,7 +27,7 @@ class CompetitorMention(SQLModel, BaseObject, table=True):
     normalized_name: str = Field(sa_column=Column(String, nullable=False))
     position: int | None = Field(default=None, sa_column=Column(Integer, nullable=True))
 
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def counts_for_run(visibility_run_id: str) -> dict[str, int]:

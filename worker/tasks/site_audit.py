@@ -25,16 +25,17 @@ from urllib.parse import urljoin, urlparse
 from curl_cffi.requests import AsyncSession
 
 from objects.brand import Brand
-from objects.finding import SEVERITY_SERIOUS, SEVERITY_WARN, Finding
+from objects.finding import SEVERITY_SERIOUS, SEVERITY_WARN, STATUS_DUPLICATE, Finding
 from objects.site import Site
+from utils.first_plan import queue_first_plan_when_ready
 from utils.logger import logger
 from utils.site_fetch import fetch as _fetch
 from utils.site_fetch import site_session
-from utils.task_queue import create_task, task_lifecycle
+from utils.task_queue import RETRY_WITH_BACKOFF, create_task, task_lifecycle
 from worker.app import app
 
 
-@app.task(name="site_audit", queue="audit", retry=2)
+@app.task(name="site_audit", queue="audit", retry=RETRY_WITH_BACKOFF)
 async def site_audit(task_id: str, brand_id: str) -> None:
     """#3 (ongoing) — crawl + audit rule engine over the brand's connected
     site -> typed findings. Fires at onboarding (site connect) and weekly via
@@ -42,7 +43,7 @@ async def site_audit(task_id: str, brand_id: str) -> None:
     technical_fix task (inside run_site_audit). Idempotent: re-detected
     findings dedupe, vanished ones auto-resolve — retries are safe."""
     async with task_lifecycle(task_id):
-        await run_site_audit(brand_id)
+        await run_site_audit(brand_id, completing_task_id=task_id)
 
 
 MAX_PAGES = 25
@@ -237,13 +238,26 @@ def _ld_json_types(blocks: list[str]) -> list[str]:
     return types
 
 
+def normalize_page_url(url: str) -> str:
+    """One spelling per page, for crawl dedup and finding keys: lowercase
+    scheme + host, default port dropped, empty path -> '/', fragment dropped.
+    The query string is kept (it can select a different page), and only the
+    ROOT gains a slash — '/about' and '/about/' may be distinct pages."""
+    parsed_url = urlparse(url.strip())
+    scheme = parsed_url.scheme.lower()
+    host = (parsed_url.hostname or "").lower()
+    if parsed_url.port and (scheme, parsed_url.port) not in (("http", 80), ("https", 443)):
+        host = f"{host}:{parsed_url.port}"
+    return parsed_url._replace(scheme=scheme, netloc=host, path=parsed_url.path or "/", fragment="").geturl()
+
+
 def extract_internal_links(base_url: str, html: str) -> list[str]:
-    """Same-host hrefs, absolutized, fragments stripped, deduped in order."""
-    base_hostname = urlparse(base_url).netloc
+    """Same-host hrefs, absolutized + normalized (normalize_page_url), deduped in order."""
+    base_hostname = urlparse(normalize_page_url(base_url)).netloc
     seen_urls: set[str] = set()
     internal_links: list[str] = []
     for href in re.findall(r"<a[^>]+href=[\"']([^\"']+)[\"']", html, re.I):
-        absolute_url = urljoin(base_url, href.strip()).split("#", 1)[0]
+        absolute_url = normalize_page_url(urljoin(base_url, href.strip()))
         parsed_url = urlparse(absolute_url)
         is_same_host_web_link = parsed_url.scheme in ("http", "https") and parsed_url.netloc == base_hostname
         if is_same_host_web_link and absolute_url not in seen_urls:
@@ -253,13 +267,29 @@ def extract_internal_links(base_url: str, html: str) -> list[str]:
 
 
 def finding_key(kind: str, detail: dict) -> tuple[str, str]:
-    """Dedupe identity for the open-findings diff: kind + the page it's about."""
-    return (kind, (detail or {}).get("url", ""))
+    """Dedupe identity for the open-findings diff: kind + the page it's about
+    (normalized, so 'https://site' and 'https://site/' are one page)."""
+    url = (detail or {}).get("url", "")
+    return (kind, normalize_page_url(url) if url else "")
 
 
 ##############################
 # CRAWL + DIFF
 ##############################
+
+
+def split_duplicate_open_findings(open_findings: list) -> tuple[dict, list]:
+    """Open findings by finding_key, oldest kept (it carries the issue's age);
+    any later row under the same key is a duplicate for the diff to resolve."""
+    open_finding_by_key: dict = {}
+    duplicates: list = []
+    for open_finding in sorted(open_findings, key=lambda finding: finding.created_at):
+        key = finding_key(open_finding.kind, open_finding.detail)
+        if key in open_finding_by_key:
+            duplicates.append(open_finding)
+        else:
+            open_finding_by_key[key] = open_finding
+    return open_finding_by_key, duplicates
 
 
 async def _crawl(base_url: str) -> list[dict]:
@@ -277,7 +307,7 @@ async def _crawl(base_url: str) -> list[dict]:
         if not await _find_sitemap(client, checked_sitemap_urls):
             findings.append(_finding(KIND_MISSING_SITEMAP, SEVERITY_WARN, f"No working sitemap found ({len(checked_sitemap_urls)} locations checked, including any robots.txt names)", sitemap_url, checked=checked_sitemap_urls))
 
-        urls_to_visit = [base_url]
+        urls_to_visit = [normalize_page_url(base_url)]
         visited_urls: set[str] = set()
         while urls_to_visit and len(visited_urls) < MAX_PAGES:
             page_url = urls_to_visit.pop(0)
@@ -319,14 +349,14 @@ async def _fetch_text(client: AsyncSession, url: str) -> str | None:
     return response.text
 
 
-async def run_site_audit(brand_id: str) -> dict:
+async def run_site_audit(brand_id: str, completing_task_id: str | None = None) -> dict:
     brand = await Brand.get(brand_id)
     site = await Site.by_brand(brand_id)
 
     detected_findings = await _crawl(brand.website_url)
 
     open_findings = await Finding.open_for_brand(brand_id)
-    open_finding_by_key = {finding_key(open_finding.kind, open_finding.detail): open_finding for open_finding in open_findings if open_finding.kind in AUDIT_KINDS}
+    open_finding_by_key, duplicate_open_findings = split_duplicate_open_findings([open_finding for open_finding in open_findings if open_finding.kind in AUDIT_KINDS])
     detected_finding_keys = {finding_key(detected["kind"], detected["detail"]) for detected in detected_findings}
 
     created_count = 0
@@ -345,6 +375,8 @@ async def run_site_audit(brand_id: str) -> dict:
         # loops the same ids)
         await create_task(brand_id=brand_id, name="technical_fix", queue="fixes", payload={"finding_ids": new_fixable_finding_ids})
 
+    for duplicate_finding in duplicate_open_findings:
+        await Finding.resolve(duplicate_finding.id, status=STATUS_DUPLICATE)  # a twin under one normalized key (pre-normalization 'https://site' vs 'https://site/'); not a fix (DEC-020)
     resolved_count = 0
     for key, open_finding in open_finding_by_key.items():
         no_longer_detected = key not in detected_finding_keys
@@ -352,5 +384,6 @@ async def run_site_audit(brand_id: str) -> dict:
             await Finding.resolve(open_finding.id)
             resolved_count += 1
 
-    logger.info(f"[audit] brand {brand_id}: {len(detected_findings)} detected, {created_count} new, {resolved_count} auto-resolved")
+    logger.info(f"[audit] brand {brand_id}: {len(detected_findings)} detected, {created_count} new, {resolved_count} auto-resolved, {len(duplicate_open_findings)} duplicates closed")
+    await queue_first_plan_when_ready(brand_id, completing_task_id)
     return {"detected": len(detected_findings), "created": created_count, "resolved": resolved_count}

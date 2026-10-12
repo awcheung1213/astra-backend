@@ -9,28 +9,33 @@ Two halves live here:
   completion marker (rule 2); the runner COMMITS after every operation, so a
   failure mid-set keeps the finished markers and a retried apply RESUMES at
   the first incomplete op — never repeats one. The adapter reads the current
-  value before writing (previous_value = the rollback record; a revert is a
-  NEW change set built from those).
+  value before writing and CHECKPOINTS it (committed on the op) before the
+  write — previous_value = the rollback record, captured once, so a crash
+  between write and marker can't make a retry record the NEW value; a revert
+  is a NEW change set built from those. Applies to one site are serialized by
+  a per-site procrastinate lock (utils/approval_flow.apply_lock).
 
 The writes themselves live in adapters/cms/ (rule 6 — the only door to the
 outside world); a platform not in APPLY_ENABLED_PLATFORMS still gets its
 change set recorded at approval (durable, pending), just never enqueued."""
 
-from adapters.cms.common import CmsWriteError
+from sqlalchemy import select
+
+from adapters.cms.common import Checkpoint, CmsWriteError
 from adapters.cms.shopify_adapter import ShopifyAdapter
 from adapters.cms.wordpress_adapter import WordPressAdapter
 from objects.artifact import Artifact
 from objects.brand import Brand
-from objects.change_set import STATUS_APPLIED, STATUS_APPLYING, STATUS_REVERTED, ChangeSet
+from objects.change_set import STATUS_APPLIED, STATUS_APPLYING, STATUS_REVERTED, ChangeSet, completed_operation_count
 from objects.notification import KIND_UPDATE, Notification
 from objects.site import Site
 from utils.database import Database
 from utils.logger import logger
-from utils.task_queue import task_lifecycle
+from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
 
 
-@app.task(name="change_set_apply", queue="changes", retry=2)
+@app.task(name="change_set_apply", queue="changes", retry=RETRY_WITH_BACKOFF)
 async def change_set_apply(task_id: str, brand_id: str) -> None:
     """CHAINED from the approval endpoint (payload carries change_set_id).
     Applies the set op by op, committing each completion marker as it lands —
@@ -51,7 +56,7 @@ async def change_set_apply(task_id: str, brand_id: str) -> None:
         for operation in change_set.operations:
             if operation.get("completed_at"):
                 continue  # rule 2: a retried apply RESUMES, never repeats
-            apply_result = await _apply_operation(site, operation)
+            apply_result = await _apply_operation(site, operation, _checkpoint_for(change_set.id, operation["id"]))
             await ChangeSet.mark_operation_complete(change_set.id, operation["id"], apply_result)
             await Database.session.commit()  # the marker must survive a later op's failure
             applied_count += 1
@@ -59,8 +64,34 @@ async def change_set_apply(task_id: str, brand_id: str) -> None:
         await ChangeSet.update_status(change_set.id, STATUS_APPLIED)
         await Database.session.commit()
         if applied_count:
+            # the SET's count, not this attempt's — a resumed apply finished ops from earlier attempts too
             brand = await Brand.get(brand_id)
-            await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title="Approved changes were applied to your site", body=f"{applied_count} change(s) went live.", link_ref=f"change_sets/{change_set.id}")
+            title, body = applied_notification_text(completed_operation_count(change_set), is_revert=await _is_revert(change_set.id))
+            await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title=title, body=body, link_ref=f"change_sets/{change_set.id}")
+
+
+def applied_notification_text(count: int, is_revert: bool) -> tuple[str, str]:
+    """The Pulse line for a finished apply — an Undo must not read like a new change going live."""
+    if is_revert:
+        return "We undid a change on your site", f"{count} change(s) rolled back."
+    return "Approved changes were applied to your site", f"{count} change(s) went live."
+
+
+async def _is_revert(change_set_id: str) -> bool:
+    """A revert set is the one some original's reverted_by_change_set_id points at."""
+    rows = await Database.session.execute(select(ChangeSet.id).where(ChangeSet.reverted_by_change_set_id == change_set_id).limit(1))  # type: ignore
+    return rows.first() is not None
+
+
+def _checkpoint_for(change_set_id: str, operation_id: str) -> Checkpoint:
+    """The adapter's mid-op checkpoint: persist + COMMIT before it touches the
+    site, so the rollback record outlives any crash after the write."""
+
+    async def checkpoint(fields: dict) -> None:
+        await ChangeSet.record_operation_progress(change_set_id, operation_id, fields)
+        await Database.session.commit()
+
+    return checkpoint
 
 
 # a platform joins this set when its write adapter is actually built; any
@@ -137,15 +168,15 @@ def invert_operations(change_set: ChangeSet) -> list[dict] | None:
 ##############################
 
 
-async def _apply_operation(site: Site, operation: dict) -> dict:
+async def _apply_operation(site: Site, operation: dict, checkpoint: Checkpoint) -> dict:
     """Route one operation to the site's platform adapter (adapters/cms/).
-    The adapter contract: READ the current value before writing and return it
-    as previous_value (the rollback record reverts are built from); return
-    created_ref for anything the op created."""
+    The adapter contract: READ the current value before writing, checkpoint
+    it, and return it as previous_value (the rollback record reverts are built
+    from); checkpoint + return created_ref for anything the op created."""
     adapter_class = ADAPTER_BY_PLATFORM.get(site.platform)
     if adapter_class is None:
         raise ValueError(f"no write adapter for platform {site.platform!r}")
-    return await adapter_class(site).apply(operation)
+    return await adapter_class(site).apply(operation, checkpoint)
 
 
 ADAPTER_BY_PLATFORM: dict[str, type[WordPressAdapter] | type[ShopifyAdapter]] = {"wordpress": WordPressAdapter, "shopify": ShopifyAdapter}

@@ -31,7 +31,7 @@ built yet — chained/event runners register in the same change as their produce
 |---|---|---|
 | 1 | Access provisioning | `api/onboarding.py` *(planned)* creates the client-task rows (no queue job); `worker/tasks/briefs.py` `client_chase` nags them daily |
 | 2 | Kickoff interview → business context | `api/onboarding.py` *(planned)*, AM-conducted → `brands` context fields |
-| 3 | Full technical audit | `worker/tasks/site_audit.py` (fires at site connect, then weekly) |
+| 3 | Full technical audit | `worker/tasks/site_audit.py` (fires at launch, then weekly) |
 | 4 | Keyword + AI-prompt research | `worker/tasks/research.py` *(planned)* `research_prompts`, fired by onboarding, re-fired by plan updates |
 | 5 | Competitor & citation-source gap analysis | `worker/tasks/research.py` *(planned)* bootstrap + `worker/tasks/collection.py` continuous ~5% discovery sampling |
 | 6 | Baseline report | the brand's first run of `worker/tasks/visibility.py` + `worker/tasks/reports.py`, fired by onboarding |

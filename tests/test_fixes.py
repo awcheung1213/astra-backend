@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from worker.tasks.fixes import GENERIC_FIELDS, _agent_prompt, _finding_ids, same_site, validate_operations
+from worker.tasks.fixes import GENERIC_FIELDS, _agent_prompt, _finding_ids, display_errors, same_site, validate_operations
 
 
 def test_payload_accepts_the_per_audit_list_and_the_legacy_single_id():
@@ -48,3 +48,31 @@ def test_agent_prompt_lists_findings_with_facts_and_the_platform_playbooks():
     assert "Writable fields: title, excerpt, content" in prompt
     assert "Choosing the schema.org type" in prompt and "WordPress homepage" in prompt  # skills selected by kind + platform
     assert "Shopify pages" not in prompt
+
+
+GOOD_DISPLAY = {
+    "title": "Add a business card for search engines to your contact page",
+    "changes": [
+        {
+            "verb": "Add",
+            "what": "a business card for search engines and AI assistants",
+            "why": "It tells Google and AI assistants who you are so they describe you correctly.",
+            "page": "your contact page",
+            "shows": "Contact Evergreen — Evergreen is an AI SEO platform that measures whether you show up.",
+        }
+    ],
+}
+
+
+def test_display_gate_accepts_owner_level_copy_and_lets_the_quote_say_anything():
+    assert display_errors(GOOD_DISPLAY, 1) == []  # 'SEO' inside the verbatim quote is fine
+
+
+def test_display_gate_refuses_technical_words_shape_and_length():
+    jargon = {**GOOD_DISPLAY, "changes": [{**GOOD_DISPLAY["changes"][0], "what": "a JSON-LD schema block in the page HTML"}]}
+    assert display_errors(jargon, 1) == ["technical words are not allowed on the owner's card: block, html, json-ld, schema — say it in everyday words"]
+    assert "display.changes has 1 entries for 2 operations" in display_errors(GOOD_DISPLAY, 2)
+    assert display_errors({"title": "x", "changes": []}, 1) == ["display.changes must list one entry per operation"]
+    assert "display.changes[0].verb must be one of Add, Set, Update" in display_errors({"title": "t", "changes": [{"verb": "Install", "what": "w", "why": "y", "page": "p", "shows": "s"}]}, 1)
+    assert "display.title must be 80 characters or fewer" in display_errors({**GOOD_DISPLAY, "title": "x" * 81}, 1)
+    assert display_errors("nope", 1) == ["display must be an object"]

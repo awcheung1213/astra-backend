@@ -6,6 +6,17 @@ from starlette.responses import Response
 
 from utils.logger import logger
 
+# request-body keys whose values never reach the log (site/Google credentials)
+SECRET_KEY_PARTS = ("password", "secret", "token", "credential", "api_key")
+
+
+def redact(value):
+    if isinstance(value, dict):
+        return {key: "*****" if any(part in str(key).lower() for part in SECRET_KEY_PARTS) else redact(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    return value
+
 
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
@@ -14,14 +25,15 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         logger.debug(f"method: {request.method}")
         logger.debug(f"url: {request.url}")
         request_headers = dict(request.headers)
-        if "authorization" in request_headers:
-            request_headers["authorization"] = "*****"
+        for header in ("authorization", "x-evergreen-signature"):
+            if header in request_headers:
+                request_headers[header] = "*****"
         logger.debug(f"headers: {request_headers}")
         try:
             request_body = json.loads(await request.body())
         except json.JSONDecodeError:
             request_body = {}
-        logger.debug(f"body: {request_body}")
+        logger.debug(f"body: {redact(request_body)}")
 
         # get the response
         response = await call_next(request)

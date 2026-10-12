@@ -7,6 +7,7 @@ from sqlmodel import Field, SQLModel
 
 from exceptions.exceptions import TaskNotFound
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 STATUS_QUEUED = "queued"
@@ -39,7 +40,7 @@ class Task(SQLModel, BaseObject, table=True):
     # no claimed_by/lease columns: claim, lease, and stalled-worker recovery are
     # procrastinate's job (heartbeats) — this row tracks MEANING, not dispatch
     finished_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def get(id: str) -> "Task":
@@ -69,12 +70,24 @@ class Task(SQLModel, BaseObject, table=True):
         return list(rows.scalars().all())
 
     @staticmethod
+    async def start_attempt(id: str) -> None:
+        """Mark running AND count the attempt — task_lifecycle commits this
+        BEFORE the work, so a failed attempt's rollback never un-counts it."""
+        task = await Database.session.get(Task, id)
+        if task is None:
+            raise TaskNotFound()
+        task.status = STATUS_RUNNING
+        task.attempt_count = (task.attempt_count or 0) + 1
+        Database.session.add(task)
+        await Database.session.flush()
+
+    @staticmethod
     async def update_status(id: str, status: str) -> None:
         task = await Database.session.get(Task, id)
         if task is None:
             raise TaskNotFound()
         task.status = status
         if status in (STATUS_DONE, STATUS_FAILED, STATUS_DEAD):
-            task.finished_at = datetime.now()
+            task.finished_at = clock.now()
         Database.session.add(task)
         await Database.session.flush()

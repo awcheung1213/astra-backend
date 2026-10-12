@@ -6,7 +6,7 @@ from settings.base import *  # noqa
 # --- database: the local docker-compose Postgres container (hardcoded) ---
 DATABASE_HOST = "evergreen-backend-database"
 REPLICA_DATABASE_HOST = "evergreen-backend-database"
-DATABASE_NAME = "postgres"
+DATABASE_NAME = os.environ.get("DATABASE_NAME", "postgres")  # override points a second process at another DB (e.g. evergreen_verify)
 DATABASE_USERNAME = "postgres"
 DATABASE_PASSWORD = "postgres"
 DATABASE_PORT = 5432
@@ -28,5 +28,8 @@ SUPABASE_PUBLISHABLE_KEY = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "")
 # auth-dependent tests SKIP when absent (tests/_auth.py)
 TEST_RUNNER_EMAIL = os.environ.get("TEST_RUNNER_EMAIL", "")
 TEST_RUNNER_PASSWORD = os.environ.get("TEST_RUNNER_PASSWORD", "")
+
+# --- review webhook HMAC (X-Evergreen-Signature); unset = every delivery 401s (fails CLOSED) ---
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
 TEST_URL = "http://evergreen-backend:8000"

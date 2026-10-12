@@ -8,30 +8,37 @@ approval-driven: calendar approval fans out the drafts (api/approvals.py),
 never cron."""
 
 import json
+from datetime import date, datetime
 
 from adapters.agents.claude_agent import ClaudeAgent
-from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, Artifact
+from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, STATUS_PENDING_REVIEW, Artifact
 from objects.brand import Brand
 from objects.notification import KIND_UPDATE, Notification
 from objects.prompt import Prompt
 from objects.prompt_result import PromptResult
 from objects.visibility_run import VisibilityRun
+from utils import clock
 from utils.agent_json import parse_agent_json
 from utils.agent_prompts import ROLE_CONTENT
 from utils.approval_flow import fan_out_approval, initial_artifact_status
 from utils.logger import logger
-from utils.task_queue import task_lifecycle
+from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
 from worker.tasks.fixes import fetch_page_html, visible_text
 
 
-@app.task(name="content_calendar", queue="content", retry=2)
+@app.task(name="content_calendar", queue="content", retry=RETRY_WITH_BACKOFF)
 async def content_calendar(task_id: str, brand_id: str) -> None:
     """#10 — the month's content calendar, drafted plan-aware by the Content
     agent -> calendar artifact behind the approval gate. Approved rows fan out
     content_draft tasks (#11) — from the approval signal, never from cron."""
     async with task_lifecycle(task_id):
         brand = await Brand.get(brand_id)
+        live_calendar = await Artifact.latest(brand.id, type="calendar", statuses=[STATUS_PENDING_REVIEW, STATUS_APPROVED, STATUS_AUTO_APPROVED])
+        if live_calendar is not None and same_month(live_calendar.created_at, clock.today()):
+            # DEC-019: one calendar per brand per month — a re-fire is a no-op (a rejected one may be redrafted)
+            logger.info(f"[content_calendar] brand {brand.id}: calendar {live_calendar.id} already drafted this month — skipped")
+            return
         facts = await _assemble_calendar_facts(brand)
 
         agent_output = await ClaudeAgent().run_role(
@@ -57,7 +64,11 @@ async def content_calendar(task_id: str, brand_id: str) -> None:
             await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title="Next month's content calendar is ready for review", link_ref=f"artifacts/{calendar.id}")
 
 
-@app.task(name="content_draft", queue="content", retry=2)
+def same_month(created_at: datetime, today: date) -> bool:
+    return (created_at.year, created_at.month) == (today.year, today.month)
+
+
+@app.task(name="content_draft", queue="content", retry=RETRY_WITH_BACKOFF)
 async def content_draft(task_id: str, brand_id: str) -> None:
     """#11 — CHAINED from calendar approval, one per approved entry (payload
     carries the entry; #25's data-study write-up rides this runner too, with
@@ -95,7 +106,7 @@ async def content_draft(task_id: str, brand_id: str) -> None:
             logger.info(f"[content] brand {brand.id}: draft ready for review — {draft['title']}")
 
 
-@app.task(name="content_refresh", queue="content", retry=2)
+@app.task(name="content_refresh", queue="content", retry=RETRY_WITH_BACKOFF)
 async def content_refresh(task_id: str, brand_id: str) -> None:
     """#12 — CHAINED from alert_detection, one per decayed page (payload
     carries the page + decay evidence). The Content agent reads the live page
@@ -206,7 +217,9 @@ def _calendar_prompt(brand: Brand, facts: dict) -> str:
         f"Draft next month's content calendar for the brand below: up to {CALENDAR_MAX_ENTRIES} pieces across weeks 1-4.\n"
         "Prioritize pieces that close the visibility gaps (queries where AI engines don't mention the brand)\n"
         "and serve the current plan's workstreams. Don't repeat the previous calendar's topics. Use ONLY the\n"
-        "facts provided — if there is no plan or no gap data yet, plan from the brand context alone.\n\n"
+        "facts provided — if there is no plan or no gap data yet, plan from the brand context alone.\n"
+        "Schedule only pieces that can be written from these facts: never a placeholder title ([competitor],\n"
+        "TBD) and never a piece gated on material the client has not supplied yet.\n\n"
         "Respond with ONLY a JSON array, no prose and no code fences. Each entry:\n"
         '{"week": 1, "title": "...", "target_queries": ["..."], "rationale": "one sentence tied to a fact"}\n\n'
         f"Brand: {brand.name} ({brand.website_url})\n"

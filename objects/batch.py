@@ -7,6 +7,7 @@ from sqlmodel import Field, SQLModel
 
 from constants.constants import UsageKind
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 KIND_EXECUTE_PROMPTS = "execute_prompts"
@@ -22,8 +23,8 @@ class Batch(SQLModel, BaseObject, table=True):
     dedup lives in `subscribers`, which is why brand_id is NULLABLE (an
     execute batch belongs to no single brand; a sentiment batch belongs to one).
     Usage is NOT stored here: the ingest job writes cost_events (the single
-    cost ledger) when it fetches results. task_id is set only when an agentic
-    task submitted the batch — ingest passes it through to the cost_event.
+    cost ledger) when it fetches results. task_id is set when a task submitted the batch
+    (e.g. the prompt sign-off's first fill) — ingest passes it through to the cost_event.
     """
 
     __tablename__ = "batches"
@@ -37,7 +38,7 @@ class Batch(SQLModel, BaseObject, table=True):
     status: str = Field(sa_column=Column(String, nullable=False))  # provider-native; poller checks each provider's TERMINAL_STATUSES
     processed: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
     request_metadata: dict = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False, server_default="{}"))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def unprocessed(kind: UsageKind | None = None) -> list["Batch"]:
@@ -57,8 +58,8 @@ class Batch(SQLModel, BaseObject, table=True):
         return batch
 
     @staticmethod
-    async def create(provider: str, batch_id: str, brand_id: str | None, status: str, request_metadata: dict, kind: UsageKind = UsageKind.EXECUTE_PROMPTS) -> "Batch":
-        batch = Batch(provider=provider, batch_id=batch_id, brand_id=brand_id, status=status, request_metadata=request_metadata, kind=kind)
+    async def create(provider: str, batch_id: str, brand_id: str | None, status: str, request_metadata: dict, kind: UsageKind = UsageKind.EXECUTE_PROMPTS, task_id: str | None = None) -> "Batch":
+        batch = Batch(provider=provider, batch_id=batch_id, brand_id=brand_id, task_id=task_id, status=status, request_metadata=request_metadata, kind=kind)
         session = Database.session
         session.add(batch)
         await session.flush()

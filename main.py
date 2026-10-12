@@ -68,8 +68,10 @@ app.include_router(prompts_router, dependencies=GUARDED)
 app.include_router(reads_router, dependencies=GUARDED)
 app.include_router(webhooks_router)
 
-app.add_middleware(InternalServerErrorMiddleware)
+# last added = outermost. InternalServerError must wrap DatabaseSession so an
+# unhandled exception reaches the transaction (rollback) before becoming a 500
 app.add_middleware(DatabaseSessionMiddleware)
+app.add_middleware(InternalServerErrorMiddleware)
 app.add_middleware(LoggingMiddleware)
 app.add_middleware(TraceMiddleware)
 

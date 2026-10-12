@@ -6,6 +6,7 @@ from sqlalchemy import Column, DateTime, ForeignKey, Integer, Numeric, String, f
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database
 
 
@@ -13,6 +14,11 @@ class CostEvent(SQLModel, BaseObject, table=True):
     """The dollar ledger — margin is a GROUP BY. Written manually at the spend
     sites (batch ingest in Collector.poll_batches, per turn in
     ClaudeAgent.run_agent, future CMS/notifier adapters as they land).
+
+    own_transaction=True commits the row on its own short session, so spend
+    survives the caller's rollback (a failed task attempt still paid for its
+    turns). Batch ingest keeps the default: its row commits atomically with
+    mark_processed, and a failed ingest re-polls and re-records it once.
 
     organization_id is NULLABLE: corpus collection is system COGS, attributable
     to no org (the shared-corpus economics make any per-org split arbitrary).
@@ -33,7 +39,7 @@ class CostEvent(SQLModel, BaseObject, table=True):
     output_tokens: int = Field(default=0, sa_column=Column(Integer, server_default="0", nullable=False))
     web_search_count: int = Field(default=0, sa_column=Column(Integer, server_default="0", nullable=False))
     usd: Decimal = Field(default=Decimal("0"), sa_column=Column(Numeric(10, 4), server_default="0", nullable=False))
-    occurred_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    occurred_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def create(
@@ -47,6 +53,7 @@ class CostEvent(SQLModel, BaseObject, table=True):
         output_tokens: int = 0,
         web_search_count: int = 0,
         usd: float = 0.0,
+        own_transaction: bool = False,
     ) -> "CostEvent":
         cost_event = CostEvent(
             adapter=adapter,
@@ -61,6 +68,11 @@ class CostEvent(SQLModel, BaseObject, table=True):
             # via str: Decimal(float) would capture the float's binary noise
             usd=Decimal(str(usd)),
         )
+        if own_transaction:
+            async with Database().create_session() as own_session:
+                own_session.add(cost_event)
+                await own_session.commit()
+            return cost_event
         session = Database.session
         session.add(cost_event)
         await session.flush()

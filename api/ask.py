@@ -31,7 +31,8 @@ QUESTION_MAX_CHARS = 2000
 async def ask(brand_id: str, request: AskRequest) -> AskResponse:
     """One Analyst call over the same dated-timeline facts the diagnosis
     runner uses. When the facts can't settle the question, a diagnosis task
-    is chained (skipped if one is already in flight) and the answer says so."""
+    is chained (skipped if one is already in flight) and the answer says so
+    only when it was actually queued (answer_with_follow_up)."""
     question = request.question.strip()
     if not question:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="question is empty")
@@ -66,7 +67,18 @@ async def ask(brand_id: str, request: AskRequest) -> AskResponse:
         # #23 — the deep dive the sync answer couldn't settle
         await create_task(brand_id=brand.id, name="diagnosis", queue="planning", payload={"trigger": "ask", "evidence": {"question": question}})
         diagnosis_queued = True
-    return AskResponse.create({"answer": response["answer"], "diagnosis_queued": diagnosis_queued})
+    return AskResponse.create({"answer": answer_with_follow_up(response["answer"], diagnosis_queued), "diagnosis_queued": diagnosis_queued})
+
+
+DIAGNOSIS_PROMISE = "I've started a full diagnosis to dig deeper — it will land in your Pulse."
+
+
+def answer_with_follow_up(answer: str, diagnosis_queued: bool) -> str:
+    """The follow-up promise is the code's to make, not the model's (DEC-017):
+    appended only when a diagnosis was actually queued — the in-flight guard
+    (a diagnosis already running for the brand) gets no promise."""
+    answer = answer.strip()
+    return f"{answer}\n\n{DIAGNOSIS_PROMISE}" if diagnosis_queued else answer
 
 
 def _ask_prompt(brand: Brand, question: str, facts: dict) -> str:
@@ -74,8 +86,8 @@ def _ask_prompt(brand: Brand, question: str, facts: dict) -> str:
         "The business owner asked the question below. Answer it in markdown, plainly and concretely, from\n"
         "the facts provided — tie claims to dated data points, and say honestly what the data cannot show.\n"
         'Set "needs_diagnosis" true ONLY when the question deserves a deep investigation the facts here\n'
-        "cannot settle (a causal \"why\" with competing explanations) — your answer should then say what you\n"
-        "CAN see and that a full diagnosis is coming.\n\n"
+        'cannot settle (a causal "why" with competing explanations) — your answer should then say what you\n'
+        "CAN see. Never promise a diagnosis or any follow-up yourself: the app adds that line when one is queued.\n\n"
         "Respond with ONLY a JSON object, no prose and no code fences:\n"
         '{"answer": "markdown", "needs_diagnosis": false}\n\n'
         f"Brand: {brand.name} ({brand.website_url})\n\n"

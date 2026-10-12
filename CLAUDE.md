@@ -26,10 +26,14 @@ inventing structure; update it when a decision changes.
 `make check` (flake8 + mypy + black/isort --check + pytest) · `make test k=expr` ·
 `make lint` / `make type` / `make format` · `make migration "msg"` ·
 `make upgrade` / `make downgrade` · `make queue-schema` · `make shell` · `make purge` ·
-`make tinker` (atomic e2e: `tinker.py` drives the whole onboarding flow through the
-API, then fires every cron schedule by hand and drains the queue in-process — $0 with
-stubbed agents + engines, `args="--live"` for the real API + Anthropic; it stops the
-worker container for the run so nothing double-executes)
+`make tinker` (runs `tinker.py`, a scratch notebook of hand-run steps: each block
+calls an API handler or a runner's `.func` directly; all blocks stay commented out —
+uncomment one, run, re-comment. No CLI args, no stubs: it hits the DEV DB and real
+providers, and some steps write to the connected live site. It stops the worker
+container for the run so nothing double-executes. For a $0 end-to-end run use the
+verification harness `../evergreen-verification/harness/ev` — separate
+`evergreen_verify` DB, simulated clock (`ev warp`), stubbed agents + engines,
+`ev drive cron <name>` / `ev drain` to fire crons and drain the queue in-process)
 
 ## Conventions (identical to geoviz-backend)
 
@@ -79,6 +83,13 @@ worker container for the run so nothing double-executes)
    enqueueing. Never `defer_async()` next to a `session.add()` (dual write:
    two pools, two commits). The helper defers via procrastinate's SQL function
    through Database.session so tasks row + job are one commit.
+   ONE sanctioned exception (DEC-010): the two collection crons in
+   worker/tasks/schedules.py (weekly submit, hourly poll) `defer_async()`
+   directly with no tasks row — collection is system-wide and brand-less
+   (one corpus-deduped batch across all brands; tasks.brand_id is NOT NULL),
+   and the cron writes nothing else, so there is no dual write. Poll is
+   serialized by procrastinate's `lock="poll_batches"`. Prompt sign-off is NOT
+   part of the exception: it enqueues submit via create_task.
 
 ## Current state / next steps
 
@@ -89,8 +100,12 @@ bearer tokens verified locally (utils/token_verifier.py), ONE router-level
 `guard` dependency (utils/authz.py — 401/403 by path-resource ownership),
 one org per user on users.organization_id, `GET /me` bootstrap; local dev +
 tests borrow the geoviz STAGING Supabase project via .env (tests sign in as
-a dedicated runner, tests/_auth.py). Public exceptions: Google OAuth
-callback + review webhook (HMAC = Phase 5). Remaining gaps live in
+a dedicated runner, tests/_auth.py). Public exceptions (no bearer): Google
+OAuth callback (HMAC state is its auth) + review webhook, which is
+HMAC-authenticated (api/webhooks.py: `X-Evergreen-Signature` = hex
+HMAC-SHA256(`WEBHOOK_SECRET`, raw body), bare or `sha256=`-prefixed,
+constant-time, checked before parse; 401 otherwise; `WEBHOOK_SECRET` required
+in production, unset elsewhere = every delivery 401s). Remaining gaps live in
 `../evergreen-onboarding-gaps-plan.md` §8 (Phase 5 loose ends: client-task
-completion endpoint, webhook HMAC, pulse mark-as-read) and §9 (Phase 6
-notifier via Resend) — neither has any code yet.
+completion endpoint, pulse mark-as-read) and §9 (Phase 6 notifier via
+Resend).

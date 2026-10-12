@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils import clock
 
 
 class Snapshot(SQLModel, BaseObject, table=True):
@@ -18,4 +19,4 @@ class Snapshot(SQLModel, BaseObject, table=True):
     resource_ref: str = Field(sa_column=Column(Text, nullable=False))  # page path / resource identifier
     r2_url: str | None = Field(default=None, sa_column=Column(String, nullable=True))
     before_state: dict = Field(default_factory=dict, sa_column=Column(JSONB, nullable=False, server_default="{}"))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))

@@ -17,7 +17,7 @@ framework v1 scores brand-level) and a computed site-health score (counts
 only, no invented formula). Auth rides the router-level guard
 (utils/authz.py); GET /brands scopes by the caller's org itself."""
 
-from datetime import date, datetime, timedelta
+from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, Request, status
 
@@ -36,6 +36,8 @@ from objects.prompt_result import PromptResult
 from objects.report import Report
 from objects.task import STATUS_DONE, STATUS_QUEUED, STATUS_RUNNING, Task
 from objects.visibility_run import VisibilityRun
+from schemas.base_schemas import utc_iso
+from utils import clock
 from utils.authz import current_user
 from worker.tasks.briefs import CLIENT_TASK_NAMES
 
@@ -64,6 +66,7 @@ async def brands(request: Request) -> dict:
                 "category": brand.category,
                 "audience": brand.audience,
                 "differentiators": brand.differentiators,
+                "approval_preset": brand.approval_preset,
             }
             for brand in org_brands
         ]
@@ -96,16 +99,16 @@ async def overview(brand_id: str) -> dict:
         }
         share_of_voice = {**await PromptResult.counts_for_run(current_run.id), "competitor_mentions": await CompetitorMention.counts_for_run(current_run.id)}
 
-    first_of_this_month = date.today().replace(day=1)
+    first_of_this_month = clock.today().replace(day=1)
     first_of_last_month = (first_of_this_month - timedelta(days=1)).replace(day=1)
     return {
         "brand": {"id": brand.id, "name": brand.name, "website_url": brand.website_url, "footprint": brand.footprint, "platform": brand.platform, "description": brand.description, "category": brand.category, "audience": brand.audience, "differentiators": brand.differentiators},
         "competitors": [competitor.name for competitor in await Competitor.get_competitors_by_brand_id(brand.id)],
-        "brief": {"markdown": latest_brief.content.get("markdown"), "created_at": latest_brief.created_at.isoformat()} if latest_brief else None,
+        "brief": {"markdown": latest_brief.content.get("markdown"), "created_at": utc_iso(latest_brief.created_at)} if latest_brief else None,
         "visibility": visibility,
         "share_of_voice": share_of_voice,
         "metrics": {
-            "this_month": await MetricPoint.totals_for_period(brand.id, first_of_this_month, date.today() + timedelta(days=1)),
+            "this_month": await MetricPoint.totals_for_period(brand.id, first_of_this_month, clock.today() + timedelta(days=1)),
             "last_month": await MetricPoint.totals_for_period(brand.id, first_of_last_month, first_of_this_month),
         },
     }
@@ -144,7 +147,7 @@ async def worklog(brand_id: str) -> dict:
     """The Work page + its audit/activity/changes sub-pages: site health,
     what's running/queued, the shipped ledger, and applied change sets."""
     await Brand.get(brand_id)
-    month_ago = datetime.now() - timedelta(days=LEDGER_WINDOW_DAYS)
+    month_ago = clock.now() - timedelta(days=LEDGER_WINDOW_DAYS)
 
     running_and_queued = await Task.for_brand(brand_id, statuses=[STATUS_RUNNING, STATUS_QUEUED])
     machine_tasks = [task for task in running_and_queued if task.name not in CLIENT_TASK_NAMES]
@@ -152,16 +155,31 @@ async def worklog(brand_id: str) -> dict:
 
     return {
         "site_health": {
-            "open": [{"kind": finding.kind, "severity": finding.severity, "summary": finding.summary, "found_at": finding.created_at.isoformat() if finding.created_at else None} for finding in await Finding.open_for_brand(brand_id)],
-            "resolved_recently": [{"kind": finding.kind, "summary": finding.summary, "resolved_at": finding.resolved_at.isoformat() if finding.resolved_at else None} for finding in await Finding.resolved_since(brand_id, since=date.today() - timedelta(days=LEDGER_WINDOW_DAYS))],
+            "open": [{"kind": finding.kind, "severity": finding.severity, "summary": finding.summary, "found_at": utc_iso(finding.created_at)} for finding in await Finding.open_for_brand(brand_id)],
+            "resolved_recently": [{"kind": finding.kind, "summary": finding.summary, "resolved_at": utc_iso(finding.resolved_at)} for finding in await Finding.resolved_since(brand_id, since=clock.today() - timedelta(days=LEDGER_WINDOW_DAYS))],
         },
-        "running": [{"id": task.id, "name": task.name, "started": task.created_at.isoformat()} for task in machine_tasks if task.status == STATUS_RUNNING],
+        "running": [{"id": task.id, "name": task.name, "started": utc_iso(task.created_at)} for task in machine_tasks if task.status == STATUS_RUNNING],
         "queued": [{"id": task.id, "name": task.name} for task in machine_tasks if task.status == STATUS_QUEUED],
-        "shipped": [{"id": task.id, "name": task.name, "finished_at": task.finished_at.isoformat()} for task in done_tasks],
+        "shipped": [{"id": task.id, "name": task.name, "finished_at": utc_iso(task.finished_at)} for task in done_tasks],
         "change_sets": [
-            {"id": change_set.id, "status": change_set.status, "operation_count": len(change_set.operations), "applied_at": change_set.applied_at.isoformat() if change_set.applied_at else None, "reverted_by": change_set.reverted_by_change_set_id} for change_set in await ChangeSet.for_brand(brand_id)
+            {
+                "id": change_set.id,
+                "status": change_set.status,
+                "operation_count": len(change_set.operations),
+                "operations": [_ledger_operation(operation) for operation in change_set.operations],
+                "applied_at": utc_iso(change_set.applied_at),
+                "reverted_by": change_set.reverted_by_change_set_id,
+            }
+            for change_set in await ChangeSet.for_brand(brand_id)
         ],
     }
+
+
+def _ledger_operation(operation: dict) -> dict:
+    """What the Changes ledger says about one op (kind, field, page, a new
+    page's title) — never the values themselves, which can be whole pages."""
+    value = operation.get("value")
+    return {"op": operation.get("op"), "field": operation.get("field"), "target": operation.get("target"), "title": value.get("title") if isinstance(value, dict) else None}
 
 
 @router.get("/brands/{brand_id}/approvals")
@@ -171,8 +189,8 @@ async def approvals(brand_id: str) -> dict:
     await Brand.get(brand_id)
     client_tasks = [task for task in await Task.for_brand(brand_id, statuses=[STATUS_QUEUED]) if task.name in CLIENT_TASK_NAMES]
     return {
-        "pending": [{"id": artifact.id, "type": artifact.type, "created_at": artifact.created_at.isoformat(), "content": artifact.content} for artifact in await Artifact.pending_for_brand(brand_id)],
-        "waiting_on_you": [{"id": task.id, "name": task.name, "days_waiting": (datetime.now() - task.created_at).days if task.created_at else 0} for task in client_tasks],
+        "pending": [{"id": artifact.id, "type": artifact.type, "created_at": utc_iso(artifact.created_at), "content": artifact.content, "evidence": artifact.evidence} for artifact in await Artifact.pending_for_brand(brand_id)],
+        "waiting_on_you": [{"id": task.id, "name": task.name, "days_waiting": (clock.now() - task.created_at).days if task.created_at else 0} for task in client_tasks],
     }
 
 
@@ -187,9 +205,9 @@ async def artifact_detail(artifact_id: str) -> dict:
         "status": artifact.status,
         "content": artifact.content,
         "evidence": artifact.evidence,
-        "created_at": artifact.created_at.isoformat(),
+        "created_at": utc_iso(artifact.created_at),
         "reviewed_by": artifact.reviewed_by,
-        "reviewed_at": artifact.reviewed_at.isoformat() if artifact.reviewed_at else None,
+        "reviewed_at": utc_iso(artifact.reviewed_at),
     }
 
 
@@ -219,8 +237,8 @@ async def pulse(organization_id: str, limit: int = 50) -> dict:
                 "title": notification.title,
                 "body": notification.body,
                 "link_ref": notification.link_ref,
-                "read_at": notification.read_at.isoformat() if notification.read_at else None,
-                "created_at": notification.created_at.isoformat(),
+                "read_at": utc_iso(notification.read_at),
+                "created_at": utc_iso(notification.created_at),
             }
             for notification in await Notification.for_organization(organization_id, limit=limit)
         ]
@@ -231,7 +249,7 @@ async def pulse(organization_id: str, limit: int = 50) -> dict:
 async def reports(brand_id: str) -> dict:
     """The report archive, newest first."""
     await Brand.get(brand_id)
-    return {"reports": [{"id": report.id, "period": report.period.isoformat(), "published_at": report.published_at.isoformat() if report.published_at else None} for report in await Report.for_brand(brand_id)]}
+    return {"reports": [{"id": report.id, "period": report.period.isoformat(), "published_at": utc_iso(report.published_at)} for report in await Report.for_brand(brand_id)]}
 
 
 @router.get("/reports/{report_id}")
@@ -239,7 +257,7 @@ async def report_detail(report_id: str) -> dict:
     report = await Report.get(report_id)
     if report is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="report not found")
-    return {"id": report.id, "brand_id": report.brand_id, "period": report.period.isoformat(), "narrative": report.narrative, "metrics": report.metrics, "published_at": report.published_at.isoformat() if report.published_at else None}
+    return {"id": report.id, "brand_id": report.brand_id, "period": report.period.isoformat(), "narrative": report.narrative, "metrics": report.metrics, "published_at": utc_iso(report.published_at)}
 
 
 # TODO(attribution) GET /brands/{brand_id}/attribution — the "where the
@@ -256,7 +274,7 @@ async def leads(brand_id: str, limit: int = 100) -> dict:
     await Brand.get(brand_id)
     return {
         "leads": [
-            {"id": lead.id, "kind": lead.kind, "value_usd": float(lead.value_usd) if lead.value_usd is not None else None, "source_channel": lead.source_channel, "source_detail": lead.source_detail, "landing_path": lead.landing_path, "occurred_at": lead.occurred_at.isoformat()}
+            {"id": lead.id, "kind": lead.kind, "value_usd": float(lead.value_usd) if lead.value_usd is not None else None, "source_channel": lead.source_channel, "source_detail": lead.source_detail, "landing_path": lead.landing_path, "occurred_at": utc_iso(lead.occurred_at)}
             for lead in await Lead.for_brand(brand_id, limit=limit)
         ]
     }

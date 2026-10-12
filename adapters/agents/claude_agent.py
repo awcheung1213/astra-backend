@@ -23,13 +23,24 @@ import settings
 from constants.constants import UsageModel
 from objects.cost_event import CostEvent
 from utils.agent_prompts import system_prompt_for
-from utils.llm_usage import estimate_cost
+from utils.llm_usage import CACHE_READ_MULTIPLIER, CACHE_WRITE_MULTIPLIER, estimate_cost
 from utils.logger import logger
 
 ToolHandler = Callable[[dict], Awaitable[str]]
 UsageHook = Callable[[Any], Awaitable[None]]
 
 AGENT_MAX_ITERATIONS = 25
+
+
+def metered_input(usage) -> tuple[int, int]:
+    """(total prompt tokens, base-rate-equivalent tokens for pricing). The API's
+    input_tokens is only the UNCACHED remainder: cache writes/reads — where a
+    turn's server-side web-search iterations re-read their results — are
+    reported separately and would otherwise go unmetered (BUG-052). Pure."""
+    uncached = getattr(usage, "input_tokens", 0) or 0
+    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    return uncached + cache_write + cache_read, round(uncached + cache_write * CACHE_WRITE_MULTIPLIER + cache_read * CACHE_READ_MULTIPLIER)
 
 
 class AgentRefusal(Exception):
@@ -111,8 +122,9 @@ class ClaudeAgent:
         """Run one agent task to completion; returns the final assistant text.
 
         Passing `operation` (+ org/brand/task ids) writes one cost_events row
-        per turn; omit it to skip metering (e.g. local tinkering without a DB
-        session). The worker task function injects the rest: handlers that
+        per turn, committed on its own session so a failed attempt's spend
+        survives the task rollback; omit it to skip metering (e.g. local
+        tinkering without a DB session). The worker task function injects the rest: handlers that
         touch the outside world call other adapters, and on_usage receives
         each turn's usage so the caller enforces the task's LIFETIME token
         budget (raise from on_usage to stop the run). Writes to client sites
@@ -131,6 +143,7 @@ class ClaudeAgent:
                 usage = response.usage
                 server_tool_use = getattr(usage, "server_tool_use", None)
                 web_search_count = (getattr(server_tool_use, "web_search_requests", 0) or 0) if server_tool_use else 0
+                input_tokens, priced_input_tokens = metered_input(usage)
                 await CostEvent.create(
                     adapter="claude",
                     operation=operation,
@@ -138,10 +151,11 @@ class ClaudeAgent:
                     brand_id=brand_id,
                     task_id=task_id,
                     model=response.model,
-                    input_tokens=usage.input_tokens,
+                    input_tokens=input_tokens,
                     output_tokens=usage.output_tokens,
                     web_search_count=web_search_count,
-                    usd=estimate_cost("claude", response.model, usage.input_tokens, usage.output_tokens, web_search_count),
+                    usd=estimate_cost("claude", response.model, priced_input_tokens, usage.output_tokens, web_search_count),
+                    own_transaction=True,  # spend is real even if the task attempt rolls back
                 )
             if on_usage is not None:
                 await on_usage(response.usage)

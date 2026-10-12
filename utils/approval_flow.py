@@ -109,6 +109,10 @@ async def fan_out_approval(artifact: Artifact, approved_rows: list[int] | None =
     return []
 
 
+def apply_lock(site_id: str) -> str:
+    return f"site:{site_id}"
+
+
 async def create_and_dispatch_change_set(artifact_id: str, site: Site, brand_id: str, operations: list[dict]) -> tuple[ChangeSet, list[str]]:
     """The one path a change set is born through — approval fan-out and revert
     both use it: durable row first, apply enqueued only when the platform's
@@ -117,5 +121,6 @@ async def create_and_dispatch_change_set(artifact_id: str, site: Site, brand_id:
     if site.platform not in APPLY_ENABLED_PLATFORMS:
         logger.info(f"[approvals] change set {change_set.id} recorded — {site.platform} write adapter not built yet, apply parked")
         return change_set, []
-    await create_task(brand_id=brand_id, name="change_set_apply", queue="changes", payload={"change_set_id": change_set.id})
+    # the per-site execution lock: applies to one site run one at a time, in approval order (interleaved read-before-write would corrupt rollback records)
+    await create_task(brand_id=brand_id, name="change_set_apply", queue="changes", payload={"change_set_id": change_set.id}, lock=apply_lock(site.id))
     return change_set, ["change_set_apply"]

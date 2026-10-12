@@ -1,18 +1,20 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, func, select
+from sqlalchemy import Column, DateTime, ForeignKey, String, func, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from exceptions.exceptions import ArtifactNotFound
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 STATUS_PENDING_REVIEW = "pending_review"
 STATUS_APPROVED = "approved"
 STATUS_AUTO_APPROVED = "auto_approved"
 STATUS_REJECTED = "rejected"
+STATUS_SUPERSEDED = "superseded"  # retired unreviewed by a newer artifact of its type (DEC-018); out of the approvals queue
 
 
 class Artifact(SQLModel, BaseObject, table=True):
@@ -29,7 +31,7 @@ class Artifact(SQLModel, BaseObject, table=True):
     status: str = Field(default=STATUS_PENDING_REVIEW, sa_column=Column(String, server_default=STATUS_PENDING_REVIEW, nullable=False))
     reviewed_by: str | None = Field(default=None, sa_column=Column(String, nullable=True))
     reviewed_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def create(
@@ -55,6 +57,17 @@ class Artifact(SQLModel, BaseObject, table=True):
         return artifact
 
     @staticmethod
+    async def get_for_update(id: str) -> "Artifact":
+        """The artifact row LOCKED (SELECT ... FOR UPDATE) until the request's
+        transaction ends — concurrent verdicts serialize here, so the loser
+        re-reads the winner's status instead of approving twice."""
+        rows = await Database.session.execute(select(Artifact).where(Artifact.id == id).with_for_update().execution_options(populate_existing=True))  # type: ignore[arg-type]
+        artifact = rows.scalars().first()
+        if not artifact:
+            raise ArtifactNotFound()
+        return artifact
+
+    @staticmethod
     async def review(id: str, status: str, reviewed_by: str | None = None) -> "Artifact":
         """Stamp the human verdict (approved | rejected) + who and when."""
         artifact = await Database.session.get(Artifact, id)
@@ -62,7 +75,7 @@ class Artifact(SQLModel, BaseObject, table=True):
             raise ArtifactNotFound()
         artifact.status = status
         artifact.reviewed_by = reviewed_by
-        artifact.reviewed_at = datetime.now()
+        artifact.reviewed_at = clock.now()
         Database.session.add(artifact)
         await Database.session.flush()
         await Database.session.refresh(artifact)
@@ -73,6 +86,20 @@ class Artifact(SQLModel, BaseObject, table=True):
         """The approvals queue, oldest first — review in arrival order."""
         rows = await ReplicaDatabase.session.execute(select(Artifact).where(Artifact.brand_id == brand_id).where(Artifact.status == STATUS_PENDING_REVIEW).order_by(Artifact.created_at))  # type: ignore
         return list(rows.scalars().all())
+
+    @staticmethod
+    async def for_brand(brand_id: str, type: str, statuses: list[str]) -> list["Artifact"]:
+        """Every artifact of a type for a brand in the given statuses."""
+        rows = await ReplicaDatabase.session.execute(select(Artifact).where(Artifact.brand_id == brand_id).where(Artifact.type == type).where(Artifact.status.in_(statuses)))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
+    async def supersede_pending(brand_id: str, type: str, keep_id: str) -> int:
+        """Retire the brand's still-pending artifacts of a type other than
+        keep_id (the newborn): a new plan replaces the one nobody reviewed
+        (DEC-018). Returns how many were retired."""
+        result = await Database.session.execute(update(Artifact).where(Artifact.brand_id == brand_id).where(Artifact.type == type).where(Artifact.status == STATUS_PENDING_REVIEW).where(Artifact.id != keep_id).values(status=STATUS_SUPERSEDED, reviewed_at=clock.now()))  # type: ignore
+        return result.rowcount or 0
 
     @staticmethod
     async def latest(brand_id: str, type: str, statuses: list[str] | None = None) -> "Artifact | None":

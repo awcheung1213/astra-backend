@@ -8,7 +8,7 @@ from constants.constants import UsageKind
 from objects.batch import Batch
 from objects.brand import Brand
 from objects.citation import Citation
-from objects.competitor import Competitor
+from objects.competitor import SOURCE_DISCOVERED, Competitor
 from objects.competitor_mention import CompetitorMention
 from objects.cost_event import CostEvent
 from objects.market import Market
@@ -22,23 +22,33 @@ from utils.database import Database, ReplicaDatabase
 from utils.llm_usage import estimate_cost, summarize_usage
 from utils.logger import logger
 from utils.query_normalization import query_hash
-from utils.response_parsing import parse_prompt_result_for_mention_rank
+from utils.response_parsing import mentions_name, parse_prompt_result_for_mention_rank
+from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
+from utils.urls import domain_from_url
 from worker.app import app
 from worker.tasks.visibility import hydrate_prompt_result
 
 
+# no retry: a retry after the provider accepted a batch but before Batch.create commits would pay for it twice
 @app.task(name="submit_prompt_execution_batch", queue="collection")
-async def submit_prompt_execution_batch() -> None:
+async def submit_prompt_execution_batch(task_id: str | None = None, brand_id: str | None = None) -> None:
+    """Collection is system-wide. A prompt sign-off enqueues it via create_task
+    (task_id = the signing brand's tasks row); the weekly cron defers it bare —
+    the documented rule-8 exception (brand-less system work, no tasks row)."""
     logger.info(f"[collection] submit_prompt_execution_batch - start", priority="medium")
 
-    async with ReplicaDatabase().connection():
-        async with Database().connection():
-            await run_submit_prompt_execution_batch()
+    if task_id is not None:
+        async with task_lifecycle(task_id):
+            await run_submit_prompt_execution_batch(task_id=task_id, brand_id=brand_id)
+    else:
+        async with ReplicaDatabase().connection():
+            async with Database().connection():
+                await run_submit_prompt_execution_batch()
 
     logger.info(f"[collection] submit_prompt_execution_batch - end", priority="medium")
 
 
-@app.task(name="poll_batches", queue="collection")
+@app.task(name="poll_batches", queue="collection", retry=RETRY_WITH_BACKOFF)  # idempotent: a retry re-polls
 async def poll_batches() -> None:
     logger.info(f"[collection] poll_batches - start", priority="medium")
 
@@ -137,9 +147,14 @@ COMPETITOR_DISCOVERY_SCHEMA = {
 ##############################
 
 
-async def run_submit_prompt_execution_batch() -> None:
+async def run_submit_prompt_execution_batch(task_id: str | None = None, brand_id: str | None = None) -> None:
+    """Launched brands only (AC-L19) — an abandoned signup never buys collection.
+    A sign-off (task_id + brand_id) always includes the signing brand: an
+    explicit human request, even if it lands before launch."""
     in_process = await _in_process_cells()
-    brands = await Brand.all()
+    brands = await Brand.launched()
+    if brand_id is not None and all(brand.id != brand_id for brand in brands):
+        brands.append(await Brand.get(brand_id))
     queue_for_llm: dict[str, dict[tuple[str, str], dict]] = {engine_name: {} for engine_name in settings.ACTIVE_ENGINES}
 
     for brand in brands:
@@ -221,6 +236,7 @@ async def run_submit_prompt_execution_batch() -> None:
             status=batch_handle.status,
             request_metadata=request_metadata,
             kind=UsageKind.EXECUTE_PROMPTS,
+            task_id=task_id,
         )
         await Database.session.commit()
 
@@ -278,13 +294,14 @@ async def run_poll_batches() -> None:
             await CostEvent.create(
                 adapter=batch.provider,
                 operation=batch.kind,
+                organization_id=await _batch_cost_organization_id(batch),
                 brand_id=batch.brand_id,
                 task_id=batch.task_id,
                 model=engine.model,
-                input_tokens=usage["input_tokens"],
+                input_tokens=usage["input_tokens"] + usage["cache_write_tokens"] + usage["cache_read_tokens"],
                 output_tokens=usage["output_tokens"],
                 web_search_count=usage["web_searches"],
-                usd=estimate_cost(batch.provider, engine.model, usage["input_tokens"], usage["output_tokens"], usage["web_searches"], batch=True),
+                usd=estimate_cost(batch.provider, engine.model, usage["input_tokens"], usage["output_tokens"], usage["web_searches"], batch=True, cache_write_tokens=usage["cache_write_tokens"], cache_read_tokens=usage["cache_read_tokens"]),
             )
         # sentiment -> create prompt results
         if batch.kind == UsageKind.SENTIMENT_ANALYSIS.value:
@@ -294,6 +311,14 @@ async def run_poll_batches() -> None:
             await ingest_execution_batch(batch, results)
         await Batch.mark_processed(batch.id, status=status)
         await Database.session.commit()
+
+
+async def _batch_cost_organization_id(batch: Batch) -> str | None:
+    """Sentiment packs are one brand's spend -> its org. Execution batches are
+    brand-less corpus collection (shared COGS) and stay org-NULL."""
+    if batch.kind != UsageKind.SENTIMENT_ANALYSIS.value or not batch.brand_id:
+        return None
+    return (await Brand.get(batch.brand_id)).organization_id
 
 
 async def ingest_sentiment_batch(batch: Batch, results: list[QueryResult]) -> None:
@@ -360,7 +385,7 @@ async def _prompt_result_ids_in_process() -> set[str]:
 async def _analyze_prompt_results(brand: dict, prompt_results: list[PromptResult], sentiment_by_id: dict[str, dict], competitors_discovered: list[str]) -> dict[str, PromptResultWithCompetitorMentions]:
     for competitor_name in competitors_discovered:
         if not Competitor.is_own_brand(brand["name"], competitor_name):
-            await Competitor.upsert(brand_id=brand["id"], name=competitor_name)
+            await Competitor.upsert(brand_id=brand["id"], name=competitor_name, source=SOURCE_DISCOVERED)
     competitor_regex_patterns = build_competitor_regex_patterns(await Competitor.get_competitors_by_brand_id(brand["id"]))
     excluded_names = await Competitor.excluded_names(brand["id"])
 
@@ -401,7 +426,7 @@ async def _analyze_prompt_results(brand: dict, prompt_results: list[PromptResult
 
         mentions = []
         for name, mention_rank in competitor_mention_ranks:
-            created_competitor = await Competitor.upsert(brand_id=brand["id"], name=name)
+            created_competitor = await Competitor.upsert(brand_id=brand["id"], name=name, source=SOURCE_DISCOVERED)
             mentions.append(
                 await CompetitorMention.create(
                     prompt_result_id=prompt_result.id,
@@ -446,7 +471,6 @@ async def ingest_execution_batch(batch: Batch, results: list[QueryResult]) -> No
 
 
 async def _create_prompt_result_from_query_response(brand: dict, prompt_id: str, query_response: QueryResponse, market_id: str | None = None) -> PromptResult:
-    brand_name = brand["name"].lower()
     citations = query_response.citations or []
     prompt_result = await PromptResult.create(
         prompt_id=prompt_id,
@@ -455,8 +479,8 @@ async def _create_prompt_result_from_query_response(brand: dict, prompt_id: str,
         engine=query_response.engine,
         text=query_response.text,
         raw=json.dumps(query_response.raw),
-        brand_cited=(brand_name in " ".join((citation.get("cited_text") or "").lower() for citation in citations)),
-        brand_mentioned=(brand_name in query_response.text.lower()),
+        brand_cited=_is_brand_cited(brand["name"], brand.get("website_url") or "", citations),
+        brand_mentioned=mentions_name(query_response.text, brand["name"]),
         query_response_id=query_response.id,
     )
     unique_citations: set[tuple[str, str]] = set()
@@ -476,6 +500,21 @@ async def _create_prompt_result_from_query_response(brand: dict, prompt_id: str,
             domain=citation.get("domain") or None,
         )
     return prompt_result
+
+
+def _site_host(url: str) -> str:
+    return domain_from_url(url).lower().removeprefix("www.")
+
+
+def _is_brand_cited(brand_name: str, website_url: str, citations: list[dict]) -> bool:
+    """A citation names the brand (whole word, like brand_mentioned) or points at the brand's own site."""
+    brand_host = _site_host(website_url) if website_url else ""
+    for citation in citations:
+        if mentions_name(citation.get("cited_text") or "", brand_name):
+            return True
+        if brand_host and _site_host(citation.get("url") or citation.get("domain") or "") == brand_host:
+            return True
+    return False
 
 
 async def _submit_analysis_batch(brand: dict) -> None:

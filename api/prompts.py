@@ -2,7 +2,7 @@
 
 research_prompts lands generated prompts INACTIVE; here the human activates
 the ones they want measured. The first sign-off also starts the baseline:
-collection is deferred immediately (corpus-deduped, so re-running is nearly
+collection is enqueued immediately (corpus-deduped, so re-running is nearly
 free), and the next Sunday visibility_run scores the brand's first trend
 point — #6 is the normal weekly machinery started early, not a special job.
 
@@ -15,7 +15,7 @@ from objects.brand import Brand
 from objects.prompt import Prompt
 from schemas.prompt_schemas import SignoffRequest, SignoffResponse
 from utils.logger import logger
-from worker.tasks.collection import submit_prompt_execution_batch
+from utils.task_queue import create_task
 
 router = APIRouter(prefix="/api/v1")
 
@@ -35,7 +35,8 @@ async def signoff_prompts(brand_id: str, request: SignoffRequest) -> SignoffResp
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="no matching prompts for this brand")
 
     # #6 — the engine-of-day batch collects the new active cells; Sunday's
-    # visibility_run turns them into the baseline trend point
-    await submit_prompt_execution_batch.defer_async()
-    logger.info(f"[prompts] brand {brand.id}: {activated_count} prompts activated, first fill deferred")
+    # visibility_run turns them into the baseline trend point. create_task
+    # rides the request's session: activation + job commit together
+    await create_task(brand_id=brand.id, name="submit_prompt_execution_batch", queue="collection")
+    logger.info(f"[prompts] brand {brand.id}: {activated_count} prompts activated, first fill enqueued")
     return SignoffResponse.create({"brand_id": brand.id, "activated_count": activated_count, "collection_started": True})

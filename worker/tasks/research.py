@@ -11,17 +11,20 @@ from datetime import date, timedelta
 from adapters.agents.claude_agent import ClaudeAgent
 from adapters.google_adapter import GoogleAdapter, GoogleReadError
 from objects.brand import Brand
-from objects.competitor import Competitor
+from objects.competitor import SOURCE_AI_BOOTSTRAP, Competitor
 from objects.connection import Connection
 from objects.prompt import Prompt
+from utils import clock
 from utils.agent_json import parse_agent_json
+from utils.first_plan import queue_first_plan_when_ready
 from utils.logger import logger
 from utils.query_normalization import query_hash
-from utils.task_queue import task_lifecycle
+from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
+from worker.tasks.metrics import GSC_DATA_LAG_DAYS
 
 
-@app.task(name="research_prompts", queue="research", retry=2)
+@app.task(name="research_prompts", queue="research", retry=RETRY_WITH_BACKOFF)
 async def research_prompts(task_id: str, brand_id: str) -> None:
     async with task_lifecycle(task_id):
         brand = await Brand.get(brand_id)
@@ -40,19 +43,22 @@ async def research_prompts(task_id: str, brand_id: str) -> None:
             task_id=task_id,
         )
         generated = parse_agent_json(agent_output)
-        if not isinstance(generated, list) or not all(isinstance(entry, dict) and entry.get("text") and entry.get("category") for entry in generated):
+        if not isinstance(generated, list) or not generated or not all(isinstance(entry, dict) and entry.get("text") and entry.get("category") for entry in generated):
             raise ValueError(f"prompt research output is not a list of text+category entries: {agent_output[:200]}")
 
         created_count = 0
         for entry in generated:
-            if query_hash(entry["text"]) in existing_query_hashes:
-                continue  # a re-run never duplicates a prompt the brand already has
+            entry_query_hash = query_hash(entry["text"])
+            if entry_query_hash in existing_query_hashes:
+                continue  # never duplicates a prompt the brand already has — nor one earlier in this reply
             await Prompt.create(brand_id=brand.id, text=entry["text"], category=entry["category"])
+            existing_query_hashes.add(entry_query_hash)
             created_count += 1
         logger.info(f"[research] brand {brand.id}: {created_count} prompts generated (inactive, awaiting sign-off), {len(generated) - created_count} duplicates skipped")
+        await queue_first_plan_when_ready(brand.id, task_id)
 
 
-@app.task(name="research_competitors", queue="research", retry=2)
+@app.task(name="research_competitors", queue="research", retry=RETRY_WITH_BACKOFF)
 async def research_competitors(task_id: str, brand_id: str) -> None:
     async with task_lifecycle(task_id):
         brand = await Brand.get(brand_id)
@@ -75,9 +81,10 @@ async def research_competitors(task_id: str, brand_id: str) -> None:
         for competitor_name in competitor_names:
             if Competitor.is_own_brand(brand.name, competitor_name):
                 continue
-            await Competitor.upsert(brand_id=brand.id, name=competitor_name.strip())
+            await Competitor.upsert(brand_id=brand.id, name=competitor_name.strip(), source=SOURCE_AI_BOOTSTRAP)
             seeded_count += 1
         logger.info(f"[research] brand {brand.id}: {seeded_count} competitors seeded")
+        await queue_first_plan_when_ready(brand.id, task_id)
 
 
 TARGET_PROMPT_COUNT = 15
@@ -91,7 +98,9 @@ async def _gsc_top_queries(brand: Brand) -> list[dict]:
     if gsc_connection is None:
         return []
     try:
-        top_queries = await GoogleAdapter(gsc_connection).search_top_queries(date.today() - timedelta(days=GSC_QUERY_WINDOW_DAYS), date.today() - timedelta(days=2), limit=GSC_QUERY_LIMIT * 2)
+        today = min(clock.today(), date.today())  # sent to Google's real API: sim time must never ask for future days
+        window_end = today - timedelta(days=GSC_DATA_LAG_DAYS)
+        top_queries = await GoogleAdapter(gsc_connection).search_top_queries(window_end - timedelta(days=GSC_QUERY_WINDOW_DAYS - 1), window_end, limit=GSC_QUERY_LIMIT * 2)  # endDate is inclusive: exactly GSC_QUERY_WINDOW_DAYS days
     except GoogleReadError as error:
         logger.warning(f"[research] brand {brand.id}: GSC query pull failed ({error}) — generating without it")
         return []

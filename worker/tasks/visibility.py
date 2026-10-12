@@ -7,7 +7,6 @@ computed over the FULL result set (not averaged across markets — framework
 average-of-markets). Zero LLM calls — the sweep is $0 and safe to run any
 time. No metro fan-out, no action generation (deliberately excluded)."""
 
-
 from datetime import date, timedelta
 
 from objects.brand import Brand
@@ -18,12 +17,13 @@ from objects.visibility_run import STATUS_DONE, VisibilityRun
 from objects.visibility_run_market import VisibilityRunMarket
 from schemas.prompt_result_schemas import CompetitorMention as CompetitorMentionSchema
 from schemas.prompt_result_schemas import PromptResultWithCompetitorMentions
+from utils import clock
 from utils.logger import logger
-from utils.task_queue import task_lifecycle
+from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
 
 
-@app.task(name="visibility_run", queue="visibility", retry=2)
+@app.task(name="visibility_run", queue="visibility", retry=RETRY_WITH_BACKOFF)
 async def visibility_run(task_id: str, brand_id: str) -> None:
     """#17 — one brand's weekly sweep: newest analyzed answers -> per-market
     scores -> one framework-versioned trend point. Idempotent per brand-week
@@ -89,7 +89,7 @@ def overall_score(results: list[PromptResultWithCompetitorMentions]) -> float:
 
 def week_of_today() -> date:
     """Monday of the current week — the run's trend axis."""
-    today = date.today()
+    today = clock.today()
     return today - timedelta(days=today.weekday())
 
 

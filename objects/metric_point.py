@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
+from utils import clock
 from utils.database import Database, ReplicaDatabase
 
 
@@ -25,7 +26,7 @@ class MetricPoint(SQLModel, BaseObject, table=True):
     dimension: str = Field(default="", sa_column=Column(String, server_default="", nullable=False))
     day: date = Field(sa_column=Column(Date, nullable=False))
     value: Decimal = Field(sa_column=Column(Numeric(16, 2), nullable=False))
-    created_at: datetime = Field(default=None, sa_column=Column(DateTime, server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
     async def upsert(brand_id: str, source: str, metric: str, day: date, value: float, dimension: str = "") -> None:
@@ -38,9 +39,7 @@ class MetricPoint(SQLModel, BaseObject, table=True):
     @staticmethod
     async def totals_for_period(brand_id: str, start: date, end: date) -> dict[str, float]:
         """Period totals keyed 'source:metric' — the report assembler's shape."""
-        rows = await ReplicaDatabase.session.execute(
-            select(MetricPoint.source, MetricPoint.metric, func.sum(MetricPoint.value)).where(MetricPoint.brand_id == brand_id).where(MetricPoint.day >= start).where(MetricPoint.day < end).group_by(MetricPoint.source, MetricPoint.metric)  # type: ignore
-        )
+        rows = await ReplicaDatabase.session.execute(select(MetricPoint.source, MetricPoint.metric, func.sum(MetricPoint.value)).where(MetricPoint.brand_id == brand_id).where(MetricPoint.day >= start).where(MetricPoint.day < end).group_by(MetricPoint.source, MetricPoint.metric))  # type: ignore
         return {f"{source}:{metric}": float(total) for source, metric, total in rows}
 
     @staticmethod

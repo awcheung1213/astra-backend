@@ -1,8 +1,10 @@
 """Site connect — how measuring becomes fixing: credentials are verified by
 a LIVE read through the same adapter that will later write with them, then
 encrypted and stored. Nothing is stored on a failed verify. A successful
-connect closes the grant_access client task (the chase stops nagging) and
-fires the site audit README promises "at site connect".
+connect closes the grant_access client task (the chase stops nagging). It
+does NOT queue an audit: launch queues the first one and the weekly schedule
+owns the rest (a connect during onboarding used to double the first audit —
+e2e 2026-09-15, gap 6).
 
 Auth rides the router-level guard (utils/authz.py) — these routes accept
 secrets, which is why the guard had to land before any public deploy. The
@@ -29,9 +31,9 @@ from objects.brand import PLATFORM_SHOPIFY, PLATFORM_WORDPRESS, Brand
 from objects.connection import Connection
 from objects.site import STATUS_CONNECTED, STATUS_DISCONNECTED, STATUS_ERROR, STATUS_PENDING, Site
 from objects.task import STATUS_DONE, Task
+from schemas.base_schemas import utc_iso
 from schemas.connection_schemas import ConnectionsResponse, PickPropertyRequest, ProviderStatusResponse, SiteConnectRequest, SiteStatusResponse
 from utils.logger import logger
-from utils.task_queue import create_task
 from utils.token_crypto import decrypt_credentials, encrypt_credentials
 from worker.tasks.changes import ADAPTER_BY_PLATFORM
 
@@ -54,7 +56,7 @@ async def connections(brand_id: str) -> ConnectionsResponse:
     return ConnectionsResponse.create(
         {
             "site": _site_status(site) if site else None,
-            "providers": [ProviderStatusResponse.create({"provider": connection.provider, "status": connection.status, "connected_at": connection.connected_at.isoformat() if connection.connected_at else None}) for connection in await Connection.for_brand(brand.id)],
+            "providers": [ProviderStatusResponse.create({"provider": connection.provider, "status": connection.status, "connected_at": utc_iso(connection.connected_at)}) for connection in await Connection.for_brand(brand.id)],
         }
     )
 
@@ -87,9 +89,6 @@ async def connect_site(brand_id: str, request: SiteConnectRequest) -> SiteStatus
     if grant_access_task is not None:
         await Task.update_status(grant_access_task.id, STATUS_DONE)
 
-    # README: the audit "fires at site connect, then weekly" — this is the
-    # connect half (reconnects re-audit on purpose; the crawl is cheap)
-    await create_task(brand_id=brand.id, name="site_audit", queue="audit")
     return _site_status(site)
 
 
@@ -104,7 +103,7 @@ async def disconnect_site(brand_id: str) -> SiteStatusResponse:
 
 
 def _site_status(site: Site) -> SiteStatusResponse:
-    return SiteStatusResponse.create({"platform": site.platform, "status": site.status, "connected_at": site.connected_at.isoformat() if site.connected_at else None})
+    return SiteStatusResponse.create({"platform": site.platform, "status": site.status, "connected_at": utc_iso(site.connected_at)})
 
 
 ##############################
@@ -280,7 +279,7 @@ async def google_pick_property(brand_id: str, provider: str, request: PickProper
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="that property is not accessible to the connected Google account")
         credentials["property_id"] = request.property
     connection = await Connection.upsert(brand.id, provider, STATUS_CONNECTED, encrypt_credentials(credentials))
-    return ProviderStatusResponse.create({"provider": provider, "status": connection.status, "connected_at": connection.connected_at.isoformat() if connection.connected_at else None})
+    return ProviderStatusResponse.create({"provider": provider, "status": connection.status, "connected_at": utc_iso(connection.connected_at)})
 
 
 @router.delete("/brands/{brand_id}/connections/{provider}", response_model=ProviderStatusResponse)
