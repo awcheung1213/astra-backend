@@ -1,6 +1,6 @@
 """Worker service entrypoint.
 
-Railway start command:  python -m worker.run   (railway.worker.json)
+Railway start command:  python -m worker.run   (custom start command on the worker service)
 Local:                  the evergreen-backend-worker service in docker compose
 """
 

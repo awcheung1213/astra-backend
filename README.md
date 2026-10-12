@@ -3,10 +3,10 @@
 Evergreen — the SEO agency in your pocket. One repo, one Docker image, **two Railway
 services** that differ only by start command:
 
-| Service | Start command | Config | Job |
-|---|---|---|---|
-| `api` | (image CMD) `uvicorn main:app --host 0.0.0.0 --port $PORT` | `railway.json` | REST endpoints, authz, Ask (sync Analyst) |
-| `worker` | `python -m worker.run` | `railway.worker.json` | pipelines, agent runtime, change-set engine |
+| Service | Start command | Job |
+|---|---|---|
+| `api` | (image CMD) `uvicorn main:app --host 0.0.0.0 --port $PORT` | REST endpoints, authz, Ask (sync Analyst) |
+| `worker` | `python -m worker.run` (custom start command) | pipelines, agent runtime, change-set engine |
 
 They never call each other — **Postgres is the contract** (the task queue is the
 handoff). Sole exception: Ask streams through the LLM adapter directly.
@@ -202,8 +202,19 @@ One project, three services:
 
 1. **Postgres** — Railway's plugin; put its pieces into both services below as
    `DATABASE_HOST/NAME/USERNAME/PASSWORD/PORT` (+ `ENVIRONMENT=staging|production`).
-2. **api** — this repo with `railway.json` (preDeploy runs migrations + queue schema).
-3. **worker** — this repo, same image, `railway.worker.json` (start: `python -m worker.run`).
+2. **api** — this repo (Dockerfile build). Settings in the Railway dashboard (no
+   config-as-code; Railway deprecated it): pre-deploy command `alembic upgrade head`,
+   healthcheck path `/`.
+3. **worker** — this repo, same image. Custom start command `python -m worker.run`;
+   no pre-deploy, no healthcheck, no public domain. Keep App Sleeping OFF.
+
+Both services get the same variables (`TOKEN_ENCRYPTION_KEY` must match). Full sheet:
+`../evergreen-verification/railway-env.md`.
+
+**Brand-new database only (once):** the job-queue tables aren't an Alembic migration.
+After the first `alembic upgrade head`, run `procrastinate --app=worker.app.app schema --apply`
+once (e.g. `railway ssh --service api`). Re-running it fails on an existing schema,
+which is why it isn't part of the pre-deploy command.
 
 ## Repo map (geoviz-backend conventions)
 

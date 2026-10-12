@@ -11,8 +11,9 @@ or idiom, look there first.
 
 Evergreen: an AI-run SEO agency as a product (the pivot from GeoViz — measurement
 stayed, an acting agency grew around it). One repo, one image, two Railway
-services: `api` (image CMD: uvicorn) and `worker` (python -m worker.run,
-railway.worker.json). They communicate ONLY through Postgres — the typed task
+services: `api` (image CMD: uvicorn; pre-deploy `alembic upgrade head`) and
+`worker` (custom start command `python -m worker.run`), configured in the
+Railway dashboard (no railway.json: config-as-code is deprecated). They communicate ONLY through Postgres — the typed task
 queue is the contract.
 
 Design source of truth (full column spec, queue contract, adapter layer, agent
