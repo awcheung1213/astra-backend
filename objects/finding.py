@@ -123,6 +123,18 @@ class Finding(SQLModel, BaseObject, table=True):
         await Database.session.flush()
 
     @staticmethod
+    async def retry_after_skip(id: str, facts: dict | None) -> None:
+        """What blocked a skipped fix changed (e.g. the owner installed the SEO
+        plugin): drop the skip so the fixer tries again, with fresh facts."""
+        finding = await Database.session.get(Finding, id)
+        if finding is None:
+            return
+        detail = {key: value for key, value in (finding.detail or {}).items() if key != "skipped"}
+        finding.detail = {**detail, **({"facts": facts} if facts else {})}
+        Database.session.add(finding)
+        await Database.session.flush()
+
+    @staticmethod
     async def resolve(id: str, status: str = STATUS_FIXED) -> None:
         """open -> fixed; the audit auto-resolves findings it no longer detects
         (and closes twins as STATUS_DUPLICATE)."""

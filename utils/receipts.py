@@ -12,7 +12,7 @@ customer-persona.md (the Marco test): plain words a plumber understands. Never
 import json
 import re
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, STATUS_PENDING_REVIEW, STATUS_REJECTED, STATUS_SUPERSEDED
 from objects.change_set import STATUS_APPLIED, STATUS_FAILED, STATUS_REVERTED
@@ -40,13 +40,17 @@ def is_url(value) -> bool:
 
 
 def page_label(url: str | None, kind: str | None = None) -> str:
-    """'Homepage', '/about/', or 'Whole site' for site-wide problems."""
+    """'Homepage', 'About page', or 'Whole site' for site-wide problems: the
+    page's last path segment in words, never a raw path."""
     if kind in SITE_WIDE_KINDS:
         return "Whole site"
     if not is_url(url):
         return "Your site"
-    path = urlparse(url or "").path or "/"
-    return "Homepage" if path == "/" else path
+    segments = [segment for segment in (urlparse(url or "").path or "/").split("/") if segment]
+    if not segments:
+        return "Homepage"
+    words = re.sub(r"\.(html?|php|aspx?)$", "", unquote(segments[-1])).replace("-", " ").replace("_", " ").strip()
+    return f"{_capitalize(words)} page" if words else "Homepage"
 
 
 def page_phrase(url: str | None, kind: str | None = None) -> str:
@@ -56,7 +60,7 @@ def page_phrase(url: str | None, kind: str | None = None) -> str:
         return "your homepage"
     if label in ("Whole site", "Your site"):
         return "your site"
-    return f"your {label} page"
+    return f"your {_lower_first(label)}"
 
 
 def _capitalize(text: str) -> str:
@@ -669,6 +673,13 @@ def done_for_you(items: list[dict | None], since: datetime, limit: int = 30) -> 
 ##############################
 
 
+def first_sentence(text) -> str | None:
+    """A bullet's outcome is one sentence; the rest stays behind "Read the reasoning"."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return re.split(r"(?<=[.!?])\s+", text.strip(), maxsplit=1)[0]
+
+
 def plan_workstreams(content: dict | None, needs_you_names: set[str] | None = None) -> list[dict]:
     """A plan's workstreams as a list the screen can render as bullets."""
     needs_you_names = needs_you_names or set()
@@ -680,7 +691,7 @@ def plan_workstreams(content: dict | None, needs_you_names: set[str] | None = No
         rows.append(
             {
                 "title": name,
-                "outcome": workstream.get("expected_impact") or workstream.get("why"),
+                "outcome": first_sentence(workstream.get("expected_impact") or workstream.get("why")),
                 "first_steps": [str(step) for step in workstream.get("first_moves") or [] if step],
                 "needs_you": name in needs_you_names,
             }

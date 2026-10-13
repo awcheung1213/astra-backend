@@ -450,7 +450,7 @@ def test_revert_notification_wording():
     # the Pulse line names what changed and where (marco-review T4); an Undo never reads like a new change
     original = SimpleNamespace(id="cs-1", status="reverted", reverted_by_change_set_id="cs-2", operations=[{"op": "set_field", "field": "title", "target": "https://x.com/about/"}])
     undo = SimpleNamespace(id="cs-2", status="applied", reverted_by_change_set_id=None, operations=[{"op": "set_field", "field": "title", "target": "https://x.com/about/"}])
-    assert changes.change_notification_text(undo, None, original) == ("Undid the change to your /about/ page", "Your /about/ page is back the way it was. Tap to see what changed.")
+    assert changes.change_notification_text(undo, None, original) == ("Undid the change to your about page", "Your about page is back the way it was. Tap to see what changed.")
     applied = SimpleNamespace(id="cs-3", status="applied", reverted_by_change_set_id=None, operations=[{"op": "set_field", "field": "title", "target": "https://x.com/", "value": "New", "previous_value": "Old"}])
     assert changes.change_notification_text(applied, None) == ("Set the title Google shows for your homepage", "Live now on your site. Tap to see what changed.")
 

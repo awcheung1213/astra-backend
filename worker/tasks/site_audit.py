@@ -186,6 +186,16 @@ def seo_plugin(html: str) -> str | None:
     return None
 
 
+def plugin_unblocks_skip(existing_detail: dict | None, detected_detail: dict | None) -> bool:
+    """A fix skipped for want of an SEO plugin, on a page that now renders one:
+    the owner did their part (the issue sheet links the install), so retry. Pure."""
+    skipped = (existing_detail or {}).get("skipped") or {}
+    reason = str(skipped.get("reason") or "").lower()
+    if not skipped or not any(word in reason for word in ("plugin", "yoast", "rank math", "rank_math", "aioseo", "seopress")):
+        return False
+    return bool(((detected_detail or {}).get("facts") or {}).get("seo_plugin"))
+
+
 def page_findings(url: str, html: str, elapsed_seconds: float) -> list[dict]:
     """Deterministic per-page checks -> finding dicts (kind, severity, summary,
     detail); every detail carries the page's facts."""
@@ -373,6 +383,10 @@ async def run_site_audit(brand_id: str, completing_task_id: str | None = None) -
         detected_key = finding_key(detected["kind"], detected["detail"])
         already_open = detected_key in open_finding_by_key
         if already_open:
+            existing = open_finding_by_key[detected_key]
+            if plugin_unblocks_skip(existing.detail, detected["detail"]):
+                await Finding.retry_after_skip(existing.id, detected["detail"].get("facts"))
+                new_fixable_finding_ids.append(existing.id)
             continue  # keep the original row and its age
         if detected_key in fixed_by_change_by_key:
             fixed = fixed_by_change_by_key.pop(detected_key)

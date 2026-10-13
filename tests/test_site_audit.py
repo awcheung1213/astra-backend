@@ -1,5 +1,6 @@
 """Audit rule engine — pure functions over fetched text."""
 
+import worker.tasks.site_audit as site_audit
 from worker.tasks.site_audit import (
     KIND_MISSING_H1,
     KIND_MISSING_META_DESCRIPTION,
@@ -107,3 +108,11 @@ def test_seo_plugin_detected_from_head_markers():
     assert seo_plugin("<html><head><!-- This site is optimized with the Yoast SEO plugin v22 --><title>t</title></head></html>") == "yoast"
     assert seo_plugin('<html><head><meta name="generator" content="Rank Math WordPress SEO plugin"></head></html>') == "rank_math"
     assert seo_plugin("<html><head><title>plain</title></head><body>no plugin</body></html>") is None
+
+
+def test_plugin_install_unblocks_a_plugin_skip():
+    skipped = {"skipped": {"reason": "Core WordPress has no meta description field; needs an SEO plugin such as Yoast."}}
+    assert site_audit.plugin_unblocks_skip(skipped, {"facts": {"seo_plugin": "yoast"}})
+    assert not site_audit.plugin_unblocks_skip(skipped, {"facts": {"seo_plugin": None}})
+    assert not site_audit.plugin_unblocks_skip({"skipped": {"reason": "Controlled by the theme."}}, {"facts": {"seo_plugin": "yoast"}})
+    assert not site_audit.plugin_unblocks_skip({}, {"facts": {"seo_plugin": "yoast"}})

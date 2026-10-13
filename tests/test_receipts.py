@@ -54,7 +54,7 @@ def test_open_issue_without_a_proposal_is_yellow_and_plain():
 def test_pending_proposal_means_fix_waiting_with_its_artifact():
     entry = receipts.issue_entry(_finding(url="https://reyes.example/about/"), [_proposal()], {})
     assert (entry["status"], entry["dot"], entry["status_label"], entry["artifact_id"]) == ("fix_waiting", "yellow", "Fix ready, waiting for your OK", "a1")
-    assert entry["title"] == "Your /about/ page has no business card for search engines" and entry["page_label"] == "/about/"
+    assert entry["title"] == "Your about page has no business card for search engines" and entry["page_label"] == "About page"
 
 
 def test_live_fix_is_green_fix_live_even_for_rows_closed_before_close_on_apply():
@@ -471,3 +471,15 @@ def test_ask_prompt_asks_for_a_one_line_answer_then_bullets():
     prompt = ask._ask_prompt(SimpleNamespace(name="Reyes", website_url="https://reyes.example"), "what have you done for me?", {})
     assert "at most 15 words" in prompt and "at most 5 short bullets" in prompt and "no tables unless the owner asks" in prompt.lower()
     assert "Never promise a diagnosis" in prompt  # the honesty rule stays
+
+
+def test_page_label_reads_as_words():
+    assert receipts.page_label("https://reyes.example/services/drain-cleaning/") == "Drain cleaning page"
+    assert receipts.page_label("https://reyes.example/contact.html") == "Contact page"
+    assert receipts.page_label("https://reyes.example") == "Homepage"
+    assert receipts.page_phrase("https://reyes.example/about-us/") == "your about us page"
+
+
+def test_plan_outcome_is_one_sentence():
+    rows = receipts.plan_workstreams({"workstreams": [{"name": "Fix the site", "expected_impact": "Six problems closed. Then more detail nobody reads."}]})
+    assert rows[0]["outcome"] == "Six problems closed."
