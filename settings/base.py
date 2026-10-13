@@ -4,6 +4,7 @@ import os
 # APP IDENTITY
 ##############################
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "local")
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG")  # production overrides the default to INFO
 PROJECT_NAME = "evergreen-backend"
 REGION = "us-east-1"
 VERSION = "0.1.0"

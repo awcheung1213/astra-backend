@@ -19,6 +19,7 @@ from objects.task import Task
 from schemas.ask_schemas import AskRequest, AskResponse
 from utils.agent_json import parse_agent_json
 from utils.agent_prompts import ROLE_ANALYST
+from utils.receipts import answer_summary
 from utils.task_queue import create_task
 from worker.tasks.planning import assemble_diagnosis_facts
 
@@ -67,7 +68,7 @@ async def ask(brand_id: str, request: AskRequest) -> AskResponse:
         # #23 — the deep dive the sync answer couldn't settle
         await create_task(brand_id=brand.id, name="diagnosis", queue="planning", payload={"trigger": "ask", "evidence": {"question": question}})
         diagnosis_queued = True
-    return AskResponse.create({"answer": answer_with_follow_up(response["answer"], diagnosis_queued), "diagnosis_queued": diagnosis_queued})
+    return AskResponse.create({"answer": answer_with_follow_up(response["answer"], diagnosis_queued), "answer_summary": answer_summary(response["answer"]), "diagnosis_queued": diagnosis_queued})
 
 
 DIAGNOSIS_PROMISE = "I've started a full diagnosis to dig deeper — it will land in your Pulse."
@@ -81,15 +82,25 @@ def answer_with_follow_up(answer: str, diagnosis_queued: bool) -> str:
     return f"{answer}\n\n{DIAGNOSIS_PROMISE}" if diagnosis_queued else answer
 
 
+ANSWER_FIRST_LINE_MAX_WORDS = 15
+ANSWER_MAX_BULLETS = 5
+
+
 def _ask_prompt(brand: Brand, question: str, facts: dict) -> str:
     return (
-        "The business owner asked the question below. Answer it in markdown, plainly and concretely, from\n"
-        "the facts provided — tie claims to dated data points, and say honestly what the data cannot show.\n"
+        "The business owner asked the question below. They read the first few words on a phone between\n"
+        "jobs and skip anything long. Answer from the facts provided, in this exact shape:\n"
+        f"- First line: the direct answer in at most {ANSWER_FIRST_LINE_MAX_WORDS} words. No heading, no preamble.\n"
+        f'- Then at most {ANSWER_MAX_BULLETS} short bullets ("- "), one plain sentence each, with the dates and\n'
+        "  numbers that back the answer.\n"
+        "- No headings and no tables unless the owner asks for a table. No SEO jargon: say 'the description\n"
+        "  Google shows' not 'meta description', 'business card for search engines' not 'schema'.\n"
+        "Tie claims to dated data points, and say honestly what the data cannot show.\n"
         'Set "needs_diagnosis" true ONLY when the question deserves a deep investigation the facts here\n'
         'cannot settle (a causal "why" with competing explanations) — your answer should then say what you\n'
         "CAN see. Never promise a diagnosis or any follow-up yourself: the app adds that line when one is queued.\n\n"
         "Respond with ONLY a JSON object, no prose and no code fences:\n"
-        '{"answer": "markdown", "needs_diagnosis": false}\n\n'
+        '{"answer": "first line, then the bullets, as markdown", "needs_diagnosis": false}\n\n'
         f"Brand: {brand.name} ({brand.website_url})\n\n"
         f"Question: {question}\n\n"
         f"Facts:\n{json.dumps(facts, indent=2, default=str)}"

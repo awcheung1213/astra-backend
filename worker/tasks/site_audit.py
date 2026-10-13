@@ -10,6 +10,8 @@ findings table (open -> fixed | dismissed):
   what the audit read instead of re-crawling.
 - Open audit-managed findings that are NO LONGER detected auto-resolve
   (status fixed) — re-running the audit is idempotent, not additive.
+- A finding a live fix closed (worker/tasks/changes.py) that the crawl still
+  detects is REOPENED with a fix_did_not_take marker, never duplicated.
 
 Crawling the client's PUBLIC site is a free, credential-less read, so it goes
 through utils/site_fetch (browser-fingerprinted curl_cffi — see that module for
@@ -359,12 +361,24 @@ async def run_site_audit(brand_id: str, completing_task_id: str | None = None) -
     open_finding_by_key, duplicate_open_findings = split_duplicate_open_findings([open_finding for open_finding in open_findings if open_finding.kind in AUDIT_KINDS])
     detected_finding_keys = {finding_key(detected["kind"], detected["detail"]) for detected in detected_findings}
 
+    # issues closed the moment their fix went live (worker/tasks/changes.py):
+    # one the crawl STILL sees is reopened with a "fix did not take" marker
+    # rather than duplicated — a twin would chain a fresh fix every week
+    fixed_by_change_by_key = {finding_key(fixed.kind, fixed.detail): fixed for fixed in await Finding.fixed_by_change_for_brand(brand_id) if fixed.kind in AUDIT_KINDS}
+
     created_count = 0
+    reopened_count = 0
     new_fixable_finding_ids: list[str] = []
     for detected in detected_findings:
-        already_open = finding_key(detected["kind"], detected["detail"]) in open_finding_by_key
+        detected_key = finding_key(detected["kind"], detected["detail"])
+        already_open = detected_key in open_finding_by_key
         if already_open:
             continue  # keep the original row and its age
+        if detected_key in fixed_by_change_by_key:
+            fixed = fixed_by_change_by_key.pop(detected_key)
+            await Finding.reopen_after_fix(fixed.id)
+            reopened_count += 1
+            continue
         finding = await Finding.create(brand_id=brand_id, site_id=site.id if site else None, kind=detected["kind"], severity=detected["severity"], summary=detected["summary"], detail=detected["detail"])
         created_count += 1
         if detected["kind"] in FIXABLE_KINDS:
@@ -384,6 +398,6 @@ async def run_site_audit(brand_id: str, completing_task_id: str | None = None) -
             await Finding.resolve(open_finding.id)
             resolved_count += 1
 
-    logger.info(f"[audit] brand {brand_id}: {len(detected_findings)} detected, {created_count} new, {resolved_count} auto-resolved, {len(duplicate_open_findings)} duplicates closed")
+    logger.info(f"[audit] brand {brand_id}: {len(detected_findings)} detected, {created_count} new, {reopened_count} reopened (fix did not take), {resolved_count} auto-resolved, {len(duplicate_open_findings)} duplicates closed")
     await queue_first_plan_when_ready(brand_id, completing_task_id)
     return {"detected": len(detected_findings), "created": created_count, "resolved": resolved_count}

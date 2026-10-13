@@ -447,21 +447,27 @@ async def test_crawl_audits_the_homepage_once(monkeypatch):
 
 
 def test_revert_notification_wording():
-    assert changes.applied_notification_text(1, is_revert=True) == ("We undid a change on your site", "1 change(s) rolled back.")
-    assert changes.applied_notification_text(2, is_revert=False) == ("Approved changes were applied to your site", "2 change(s) went live.")
+    # the Pulse line names what changed and where (marco-review T4); an Undo never reads like a new change
+    original = SimpleNamespace(id="cs-1", status="reverted", reverted_by_change_set_id="cs-2", operations=[{"op": "set_field", "field": "title", "target": "https://x.com/about/"}])
+    undo = SimpleNamespace(id="cs-2", status="applied", reverted_by_change_set_id=None, operations=[{"op": "set_field", "field": "title", "target": "https://x.com/about/"}])
+    assert changes.change_notification_text(undo, None, original) == ("Undid the change to your /about/ page", "Your /about/ page is back the way it was. Tap to see what changed.")
+    applied = SimpleNamespace(id="cs-3", status="applied", reverted_by_change_set_id=None, operations=[{"op": "set_field", "field": "title", "target": "https://x.com/", "value": "New", "previous_value": "Old"}])
+    assert changes.change_notification_text(applied, None) == ("Set the title Google shows for your homepage", "Live now on your site. Tap to see what changed.")
 
 
 async def test_a_revert_set_is_found_by_the_originals_link(session):
-    session.rows = [("original-id",)]
-    assert await changes._is_revert("revert-id") is True
+    session.rows = [SimpleNamespace(id="original-id")]
+    assert (await changes._reverted_original("revert-id")).id == "original-id"
     assert "change_sets.reverted_by_change_set_id = " in _sql(session.statements[0])
     session.rows = []
-    assert await changes._is_revert("plain-id") is False
+    assert await changes._reverted_original("plain-id") is None
 
 
 async def test_apply_of_a_revert_set_posts_the_undo_wording(monkeypatch, session):
     notifications: list[dict] = []
-    change_set = SimpleNamespace(id="cs-revert", status="pending", site_id="s1", operations=[{"id": "op1", "op": "set_field", "completed_at": None}])
+    change_set = SimpleNamespace(id="cs-revert", artifact_id="a1", status="pending", site_id="s1", reverted_by_change_set_id=None, operations=[{"id": "op1", "op": "set_field", "field": "title", "target": "https://x.com/", "completed_at": None}])
+    original = SimpleNamespace(id="cs-original", status="reverted", reverted_by_change_set_id="cs-revert", operations=[{"id": "op1", "op": "set_field", "field": "title", "target": "https://x.com/"}])
+    synced: list[str] = []
 
     @contextlib.asynccontextmanager
     async def lifecycle(task_id):
@@ -474,10 +480,10 @@ async def test_apply_of_a_revert_set_posts_the_undo_wording(monkeypatch, session
         return SimpleNamespace(id="s1", platform="wordpress")
 
     async def update_status(id, status):
-        return None
+        change_set.status = status
 
     async def mark_complete(id, operation_id, apply_result):
-        change_set.operations = [{"id": operation_id, "op": "set_field", "completed_at": "now"}]
+        change_set.operations = [{**change_set.operations[0], "completed_at": "now"}]
 
     async def apply_operation(site, operation, checkpoint):
         return {"previous_value": "old"}
@@ -485,12 +491,20 @@ async def test_apply_of_a_revert_set_posts_the_undo_wording(monkeypatch, session
     async def brand_get(brand_id):
         return SimpleNamespace(id="b1", organization_id="o1")
 
-    async def is_revert(change_set_id):
-        return True
+    async def reverted_original(change_set_id):
+        return original
+
+    async def sync_findings(artifact_id):
+        synced.append(artifact_id)
+        return []
+
+    async def session_get(model, id):
+        return None
 
     async def notification_create(**fields):
         notifications.append(fields)
 
+    session.get = session_get
     monkeypatch.setattr(changes, "task_lifecycle", lifecycle)
     monkeypatch.setattr(changes.ChangeSet, "get", change_set_get)
     monkeypatch.setattr(changes.ChangeSet, "update_status", update_status)
@@ -498,7 +512,9 @@ async def test_apply_of_a_revert_set_posts_the_undo_wording(monkeypatch, session
     monkeypatch.setattr(changes.Site, "get", site_get)
     monkeypatch.setattr(changes, "_apply_operation", apply_operation)
     monkeypatch.setattr(changes.Brand, "get", brand_get)
-    monkeypatch.setattr(changes, "_is_revert", is_revert)
+    monkeypatch.setattr(changes, "_reverted_original", reverted_original)
+    monkeypatch.setattr(changes, "sync_findings_with_fix", sync_findings)
     monkeypatch.setattr(changes.Notification, "create", notification_create)
     await changes.change_set_apply.func("t1", "b1")
-    assert notifications[0]["title"] == "We undid a change on your site" and notifications[0]["body"] == "1 change(s) rolled back."
+    assert synced == ["a1"]  # the finding lifecycle rides the same apply
+    assert notifications[0]["title"] == "Undid the change to your homepage" and notifications[0]["link_ref"] == "change_sets/cs-revert"

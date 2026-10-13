@@ -63,6 +63,16 @@ class Task(SQLModel, BaseObject, table=True):
         return list(rows.scalars().all())
 
     @staticmethod
+    async def done_since(brand_id: str, names: list[str], since: datetime | None = None) -> list["Task"]:
+        """DONE tasks of the given names (finished since `since`, or ever) — the
+        runs whose outcome the done-for-you feed reports."""
+        statement = select(Task).where(Task.brand_id == brand_id).where(Task.status == STATUS_DONE).where(Task.name.in_(names))  # type: ignore
+        if since is not None:
+            statement = statement.where(Task.finished_at >= since)  # type: ignore
+        rows = await ReplicaDatabase.session.execute(statement)
+        return list(rows.scalars().all())
+
+    @staticmethod
     async def in_flight(brand_id: str, name: str) -> list["Task"]:
         """Queued or running tasks of one name — producers check this before
         chaining so the same work is never stacked twice."""

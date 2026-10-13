@@ -26,11 +26,13 @@ from adapters.cms.shopify_adapter import ShopifyAdapter
 from adapters.cms.wordpress_adapter import WordPressAdapter
 from objects.artifact import Artifact
 from objects.brand import Brand
-from objects.change_set import STATUS_APPLIED, STATUS_APPLYING, STATUS_REVERTED, ChangeSet, completed_operation_count
+from objects.change_set import STATUS_APPLIED, STATUS_APPLYING, STATUS_REVERTED, ChangeSet
+from objects.finding import STATUS_FIXED, STATUS_OPEN, Finding
 from objects.notification import KIND_UPDATE, Notification
 from objects.site import Site
 from utils.database import Database
 from utils.logger import logger
+from utils.receipts import change_notification_text, finding_fix_transition, live_fix_change_set_id, proposal_finding_ids, reopened_detail, resolved_detail
 from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
 
@@ -62,25 +64,52 @@ async def change_set_apply(task_id: str, brand_id: str) -> None:
             applied_count += 1
 
         await ChangeSet.update_status(change_set.id, STATUS_APPLIED)
+        # same commit as the status flip: an issue closes the moment its fix is
+        # live and reopens when the undo lands — never one without the other
+        await sync_findings_with_fix(change_set.artifact_id)
         await Database.session.commit()
         if applied_count:
-            # the SET's count, not this attempt's — a resumed apply finished ops from earlier attempts too
             brand = await Brand.get(brand_id)
-            title, body = applied_notification_text(completed_operation_count(change_set), is_revert=await _is_revert(change_set.id))
+            artifact = await Database.session.get(Artifact, change_set.artifact_id)
+            original = await _reverted_original(change_set.id)
+            title, body = change_notification_text(change_set, artifact, original)
             await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title=title, body=body, link_ref=f"change_sets/{change_set.id}")
 
 
-def applied_notification_text(count: int, is_revert: bool) -> tuple[str, str]:
-    """The Pulse line for a finished apply — an Undo must not read like a new change going live."""
-    if is_revert:
-        return "We undid a change on your site", f"{count} change(s) rolled back."
-    return "Approved changes were applied to your site", f"{count} change(s) went live."
+async def sync_findings_with_fix(artifact_id: str) -> list[tuple[str, str]]:
+    """The fix lifecycle (marco-review R5): after any apply of a fix
+    proposal's change set — the fix itself, its undo, a redo — its findings
+    follow whether the fix is live NOW: open -> fixed (marked resolved by the
+    live set) or, once undone, fixed -> open (only findings THIS fix closed).
+    Idempotent: a second run finds nothing to transition. Returns the
+    (finding_id, action) pairs it applied."""
+    artifact = await Database.session.get(Artifact, artifact_id)
+    finding_ids = proposal_finding_ids(artifact.content) if artifact is not None and artifact.type == "change_proposal" else []
+    if not finding_ids:
+        return []
+    chain = await ChangeSet.for_artifact(artifact_id)
+    live_id = live_fix_change_set_id(chain)
+    chain_ids = {change_set.id for change_set in chain}
+    applied: list[tuple[str, str]] = []
+    for finding in await Finding.by_ids_for_update(finding_ids):
+        action = finding_fix_transition(finding.status, finding.detail, live_id, chain_ids)
+        if action == "resolve" and live_id:
+            await Finding.set_lifecycle(finding, STATUS_FIXED, resolved_detail(finding.detail, live_id))
+        elif action == "reopen":
+            await Finding.set_lifecycle(finding, STATUS_OPEN, reopened_detail(finding.detail))
+        else:
+            continue
+        applied.append((finding.id, action))
+    if applied:
+        logger.info(f"[changes] artifact {artifact_id}: findings {applied}")
+    return applied
 
 
-async def _is_revert(change_set_id: str) -> bool:
-    """A revert set is the one some original's reverted_by_change_set_id points at."""
-    rows = await Database.session.execute(select(ChangeSet.id).where(ChangeSet.reverted_by_change_set_id == change_set_id).limit(1))  # type: ignore
-    return rows.first() is not None
+async def _reverted_original(change_set_id: str) -> ChangeSet | None:
+    """The set this one undoes — a revert set is the one some original's
+    reverted_by_change_set_id points at; None for a forward change."""
+    rows = await Database.session.execute(select(ChangeSet).where(ChangeSet.reverted_by_change_set_id == change_set_id).limit(1))  # type: ignore
+    return rows.scalars().first()
 
 
 def _checkpoint_for(change_set_id: str, operation_id: str) -> Checkpoint:

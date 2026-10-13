@@ -112,7 +112,7 @@ def engine(monkeypatch):
             raise
 
     async def fake_notify(**kwargs):
-        state.notifications.append(kwargs["body"])
+        state.notifications.append((kwargs["title"], kwargs["body"]))
 
     async def fake_brand(brand_id):
         return SimpleNamespace(organization_id="org1")
@@ -133,9 +133,9 @@ def engine(monkeypatch):
     monkeypatch.setattr(changes.Site, "get", staticmethod(fake_site))
 
     async def not_a_revert(change_set_id):
-        return False
+        return None
 
-    monkeypatch.setattr(changes, "_is_revert", not_a_revert)  # BUG-021: the apply path asks whether the set is an Undo
+    monkeypatch.setattr(changes, "_reverted_original", not_a_revert)  # BUG-021: the apply path asks whether the set is an Undo
     state.arrange = arrange
     return state
 
@@ -246,7 +246,8 @@ async def test_resumed_apply_notification_counts_every_completed_op(engine):
         await changes.change_set_apply.func(task_id="t1", brand_id="b1")
     await changes.change_set_apply.func(task_id="t1", brand_id="b1")
     assert engine.writes == ["op-0", "op-1"]  # op-0 not repeated
-    assert engine.notifications == ["2 change(s) went live."] and change_set.status == "applied"
+    # the SET is described, not this attempt's share of it (marco-review T4: what changed and where)
+    assert engine.notifications == [("Made 2 changes to your homepage", "Live now on your site. Tap to see what changed.")] and change_set.status == "applied"
 
 
 ##############################

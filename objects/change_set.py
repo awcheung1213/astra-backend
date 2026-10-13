@@ -77,6 +77,20 @@ class ChangeSet(SQLModel, BaseObject, table=True):
         return list(rows.scalars().all())
 
     @staticmethod
+    async def for_artifact(artifact_id: str) -> list["ChangeSet"]:
+        """Every set born from one artifact — its applies AND its undos (a revert
+        reuses the original's artifact). Primary session: the apply runner reads
+        its own just-flushed status here."""
+        rows = await Database.session.execute(select(ChangeSet).where(ChangeSet.artifact_id == artifact_id))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
+    async def reverted_from(id: str) -> "ChangeSet | None":
+        """The set this one undoes (whose reverted_by_change_set_id points here), or None."""
+        rows = await ReplicaDatabase.session.execute(select(ChangeSet).where(ChangeSet.reverted_by_change_set_id == id).limit(1))  # type: ignore
+        return rows.scalars().first()
+
+    @staticmethod
     async def mark_reverted(id: str, reverted_by_change_set_id: str) -> None:
         """Link the original to the revert set that undoes it (append-only:
         the original row itself is never edited beyond status + link)."""

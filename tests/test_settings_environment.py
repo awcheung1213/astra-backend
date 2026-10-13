@@ -57,3 +57,11 @@ def test_unresolved_railway_reference_names_the_variable():
     result = _import_settings({**PRODUCTION, "DATABASE_HOST": ""})
     assert result.returncode != 0
     assert "DATABASE_HOST is missing or empty" in result.stderr
+
+
+def test_production_defaults_to_info_logging():
+    result = subprocess.run(
+        [sys.executable, "-c", "import settings; print(settings.LOG_LEVEL)"], env={**{k: v for k, v in os.environ.items() if k not in ("ENVIRONMENT", "RAILWAY_ENVIRONMENT")}, **PRODUCTION}, capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("INFO")

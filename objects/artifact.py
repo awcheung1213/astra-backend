@@ -94,6 +94,20 @@ class Artifact(SQLModel, BaseObject, table=True):
         return list(rows.scalars().all())
 
     @staticmethod
+    async def by_ids(ids) -> list["Artifact"]:
+        ids = [artifact_id for artifact_id in set(ids) if artifact_id]
+        if not ids:
+            return []
+        rows = await ReplicaDatabase.session.execute(select(Artifact).where(Artifact.id.in_(ids)))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
+    async def created_since(brand_id: str, since: datetime) -> list["Artifact"]:
+        """Every artifact born since `since`, newest first — the done-for-you feed's raw material."""
+        rows = await ReplicaDatabase.session.execute(select(Artifact).where(Artifact.brand_id == brand_id).where(Artifact.created_at >= since).order_by(Artifact.created_at.desc()))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
     async def supersede_pending(brand_id: str, type: str, keep_id: str) -> int:
         """Retire the brand's still-pending artifacts of a type other than
         keep_id (the newborn): a new plan replaces the one nobody reviewed

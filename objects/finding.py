@@ -78,6 +78,51 @@ class Finding(SQLModel, BaseObject, table=True):
         return list(rows.scalars().all())
 
     @staticmethod
+    async def created_since(brand_id: str, since: datetime) -> list["Finding"]:
+        """Every finding born since `since`, any status — what each audit run found."""
+        rows = await ReplicaDatabase.session.execute(select(Finding).where(Finding.brand_id == brand_id).where(Finding.created_at >= since))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
+    async def by_ids_for_update(ids: list[str]) -> list["Finding"]:
+        """The rows (primary, locked) a fix's apply/undo opens or closes."""
+        if not ids:
+            return []
+        rows = await Database.session.execute(select(Finding).where(Finding.id.in_(ids)).with_for_update().execution_options(populate_existing=True))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
+    async def fixed_by_change_for_brand(brand_id: str) -> list["Finding"]:
+        """Findings closed because a fix went live (detail.resolved_by_change_set_id) —
+        the audit reopens one if it still sees the problem instead of opening a twin."""
+        rows = await ReplicaDatabase.session.execute(select(Finding).where(Finding.brand_id == brand_id).where(Finding.status == STATUS_FIXED).where(Finding.detail.has_key("resolved_by_change_set_id")))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
+    async def set_lifecycle(finding: "Finding", status: str, detail: dict) -> None:
+        """The fix lifecycle's write (rule 5 — machine rows): fixed stamps
+        resolved_at now, open clears it; detail is replaced whole (new dict)."""
+        finding.status = status
+        finding.resolved_at = clock.now() if status == STATUS_FIXED else None
+        finding.detail = detail
+        Database.session.add(finding)
+        await Database.session.flush()
+
+    @staticmethod
+    async def reopen_after_fix(id: str) -> None:
+        """The audit still sees a problem a live fix closed: open again, marked
+        so the issue says so (the resolved_by marker stays — an Undo of that
+        fix still knows the finding is its own)."""
+        finding = await Database.session.get(Finding, id)
+        if finding is None:
+            return
+        finding.status = STATUS_OPEN
+        finding.resolved_at = None
+        finding.detail = {**(finding.detail or {}), "fix_did_not_take": {"at": clock.now().isoformat(), "change_set_id": (finding.detail or {}).get("resolved_by_change_set_id")}}
+        Database.session.add(finding)
+        await Database.session.flush()
+
+    @staticmethod
     async def resolve(id: str, status: str = STATUS_FIXED) -> None:
         """open -> fixed; the audit auto-resolves findings it no longer detects
         (and closes twins as STATUS_DUPLICATE)."""

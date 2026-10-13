@@ -6,6 +6,7 @@ renders without stitching. Screens -> endpoints:
   Tracked questions       GET /brands/{id}/questions
   Work (+audit/activity/  GET /brands/{id}/worklog
     changes sub-pages)
+  One site change         GET /change_sets/{id}   (the receipt: plain before/after)
   Your tasks              GET /brands/{id}/approvals   (+ GET /artifacts/{id} detail)
   Roadmap                 GET /brands/{id}/roadmap
   Pulse                   GET /organizations/{id}/pulse
@@ -21,10 +22,10 @@ from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, Artifact
+from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, STATUS_PENDING_REVIEW, STATUS_REJECTED, Artifact
 from objects.brand import Brand
 from objects.change_set import ChangeSet
-from objects.competitor import Competitor
+from objects.competitor import SOURCE_AI_BOOTSTRAP, Competitor
 from objects.competitor_mention import CompetitorMention
 from objects.finding import Finding
 from objects.goal import Goal
@@ -37,14 +38,20 @@ from objects.report import Report
 from objects.task import STATUS_DONE, STATUS_QUEUED, STATUS_RUNNING, Task
 from objects.visibility_run import VisibilityRun
 from schemas.base_schemas import utc_iso
-from utils import clock
+from utils import clock, receipts
 from utils.authz import current_user
 from worker.tasks.briefs import CLIENT_TASK_NAMES
+from worker.tasks.site_audit import AUDIT_KINDS
 
 router = APIRouter(prefix="/api/v1")
 
 TREND_WEEKS = 13  # ~a quarter of weekly points for the hero chart
 LEDGER_WINDOW_DAYS = 31  # "shipped this month"
+DONE_FOR_YOU_DAYS = 30
+DONE_FOR_YOU_LIMIT = 30
+ISSUES_LIMIT = 50
+CHANGE_LEDGER_LIMIT = 50  # rows the Changes ledger shows
+CHANGE_SET_SCAN_LIMIT = 200  # rows read to derive issue status + undo links
 
 
 @router.get("/brands")
@@ -145,33 +152,107 @@ async def questions(brand_id: str) -> dict:
 @router.get("/brands/{brand_id}/worklog")
 async def worklog(brand_id: str) -> dict:
     """The Work page + its audit/activity/changes sub-pages: site health,
-    what's running/queued, the shipped ledger, and applied change sets."""
+    what's running/queued, the shipped ledger, and applied change sets —
+    plus the owner-language surfaces (utils/receipts.py): `issues` (every
+    problem with a status dot), `done_for_you` (outcomes only, no plumbing),
+    and per-change headlines / who approved / undo links."""
     await Brand.get(brand_id)
     month_ago = clock.now() - timedelta(days=LEDGER_WINDOW_DAYS)
+    done_window_start = clock.now() - timedelta(days=DONE_FOR_YOU_DAYS)
 
     running_and_queued = await Task.for_brand(brand_id, statuses=[STATUS_RUNNING, STATUS_QUEUED])
     machine_tasks = [task for task in running_and_queued if task.name not in CLIENT_TASK_NAMES]
     done_tasks = [task for task in await Task.for_brand(brand_id, statuses=[STATUS_DONE]) if task.finished_at and task.finished_at > month_ago]
 
+    open_findings = await Finding.open_for_brand(brand_id)
+    resolved_findings = await Finding.resolved_since(brand_id, since=clock.today() - timedelta(days=LEDGER_WINDOW_DAYS))
+    all_change_sets = await ChangeSet.for_brand(brand_id, limit=CHANGE_SET_SCAN_LIMIT)
+    artifacts_by_id = {artifact.id: artifact for artifact in await Artifact.by_ids(change_set.artifact_id for change_set in all_change_sets)}
+    proposals = await Artifact.for_brand(brand_id, type="change_proposal", statuses=[STATUS_PENDING_REVIEW, STATUS_APPROVED, STATUS_AUTO_APPROVED, STATUS_REJECTED])
+
     return {
         "site_health": {
-            "open": [{"kind": finding.kind, "severity": finding.severity, "summary": finding.summary, "found_at": utc_iso(finding.created_at)} for finding in await Finding.open_for_brand(brand_id)],
-            "resolved_recently": [{"kind": finding.kind, "summary": finding.summary, "resolved_at": utc_iso(finding.resolved_at)} for finding in await Finding.resolved_since(brand_id, since=clock.today() - timedelta(days=LEDGER_WINDOW_DAYS))],
+            "open": [{"kind": finding.kind, "severity": finding.severity, "summary": finding.summary, "found_at": utc_iso(finding.created_at)} for finding in open_findings],
+            "resolved_recently": [{"kind": finding.kind, "summary": finding.summary, "resolved_at": utc_iso(finding.resolved_at)} for finding in resolved_findings],
         },
+        "issues": _issues(open_findings + resolved_findings, proposals, all_change_sets),
+        "done_for_you": await _done_for_you(brand_id, all_change_sets, artifacts_by_id, done_window_start),
         "running": [{"id": task.id, "name": task.name, "started": utc_iso(task.created_at)} for task in machine_tasks if task.status == STATUS_RUNNING],
         "queued": [{"id": task.id, "name": task.name} for task in machine_tasks if task.status == STATUS_QUEUED],
         "shipped": [{"id": task.id, "name": task.name, "finished_at": utc_iso(task.finished_at)} for task in done_tasks],
-        "change_sets": [
-            {
-                "id": change_set.id,
-                "status": change_set.status,
-                "operation_count": len(change_set.operations),
-                "operations": [_ledger_operation(operation) for operation in change_set.operations],
-                "applied_at": utc_iso(change_set.applied_at),
-                "reverted_by": change_set.reverted_by_change_set_id,
-            }
-            for change_set in await ChangeSet.for_brand(brand_id)
-        ],
+        "change_sets": [_change_set_entry(change_set, artifacts_by_id.get(change_set.artifact_id), all_change_sets) for change_set in all_change_sets[:CHANGE_LEDGER_LIMIT]],
+    }
+
+
+def _change_set_entry(change_set: ChangeSet, artifact: Artifact | None, change_sets: list[ChangeSet]) -> dict:
+    """One Changes-ledger row: the original keys + the owner-language ones."""
+    original = next((candidate for candidate in change_sets if candidate.reverted_by_change_set_id == change_set.id), None)
+    return {
+        "id": change_set.id,
+        "status": change_set.status,
+        "operation_count": len(change_set.operations),
+        "operations": [_ledger_operation(operation) for operation in change_set.operations],
+        "applied_at": utc_iso(change_set.applied_at),
+        "reverted_by": change_set.reverted_by_change_set_id,
+        **receipts.ledger_entry(change_set, artifact, original),
+    }
+
+
+def _issues(findings: list[Finding], proposals: list[Artifact], change_sets: list[ChangeSet]) -> list[dict]:
+    proposals_by_finding: dict[str, list[Artifact]] = {}
+    for proposal in proposals:
+        for finding_id in receipts.proposal_finding_ids(proposal.content):
+            proposals_by_finding.setdefault(finding_id, []).append(proposal)
+    change_sets_by_artifact: dict[str, list[ChangeSet]] = {}
+    for change_set in change_sets:
+        change_sets_by_artifact.setdefault(change_set.artifact_id, []).append(change_set)
+    return receipts.order_issues([receipts.issue_entry(finding, proposals_by_finding.get(finding.id, []), change_sets_by_artifact) for finding in findings], limit=ISSUES_LIMIT)
+
+
+async def _done_for_you(brand_id: str, change_sets: list[ChangeSet], artifacts_by_id: dict[str, Artifact], since) -> list[dict]:
+    """Outcomes only (receipts.done_for_you): live/undone fixes, written work,
+    audits and research with what they found, reports. Internal plumbing
+    (applies, collection batches, syncs, ticks, client tasks) never appears."""
+    items: list = receipts.change_outcomes(change_sets, artifacts_by_id, since)
+    items += [receipts.artifact_outcome(artifact) for artifact in await Artifact.created_since(brand_id, since)]
+    items += [receipts.report_outcome(report) for report in await Report.for_brand(brand_id) if report.published_at and report.published_at >= since]
+
+    audits = await Task.done_since(brand_id, ["site_audit"])
+    first_audit_id = min(audits, key=lambda task: task.created_at).id if audits else None
+    recent_audits = [task for task in audits if task.finished_at and task.finished_at >= since]
+    if recent_audits:
+        found_moments = [finding.created_at for finding in await Finding.created_since(brand_id, min(task.created_at for task in recent_audits)) if finding.kind in AUDIT_KINDS]
+        items += [receipts.audit_outcome(task, receipts.count_in_window(found_moments, task.created_at, task.finished_at), is_first=task.id == first_audit_id) for task in recent_audits]
+
+    research_runs = await Task.done_since(brand_id, ["research_prompts", "research_competitors"], since=since)
+    if research_runs:
+        prompt_moments = [prompt.created_at for prompt in await Prompt.by_brand(brand_id) if prompt.source == "generated"]
+        competitor_moments = [competitor.created_at for competitor in await Competitor.get_competitors_by_brand_id(brand_id) if competitor.source == SOURCE_AI_BOOTSTRAP]
+        for task in research_runs:
+            moments = prompt_moments if task.name == "research_prompts" else competitor_moments
+            items.append(receipts.research_outcome(task, receipts.count_in_window(moments, task.created_at, task.finished_at)))
+    return receipts.done_for_you(items, since, limit=DONE_FOR_YOU_LIMIT)
+
+
+@router.get("/change_sets/{change_set_id}")
+async def change_set_detail(change_set_id: str) -> dict:
+    """One site change, as a receipt: the ledger entry + `changes`, a plain
+    before/after per operation (never raw HTML). Auth rides the router-level
+    guard (change_set_id -> its brand's org)."""
+    change_set = await ChangeSet.get(change_set_id)
+    original = await ChangeSet.reverted_from(change_set.id)
+    artifacts = await Artifact.by_ids([change_set.artifact_id])
+    artifact = artifacts[0] if artifacts else None
+    return {
+        "id": change_set.id,
+        "brand_id": change_set.brand_id,
+        "status": change_set.status,
+        "operation_count": len(change_set.operations),
+        "operations": [_ledger_operation(operation) for operation in change_set.operations],
+        "applied_at": utc_iso(change_set.applied_at),
+        "reverted_by": change_set.reverted_by_change_set_id,
+        **receipts.ledger_entry(change_set, artifact, original),
+        "changes": receipts.change_details(change_set, original),
     }
 
 
@@ -189,7 +270,10 @@ async def approvals(brand_id: str) -> dict:
     await Brand.get(brand_id)
     client_tasks = [task for task in await Task.for_brand(brand_id, statuses=[STATUS_QUEUED]) if task.name in CLIENT_TASK_NAMES]
     return {
-        "pending": [{"id": artifact.id, "type": artifact.type, "created_at": utc_iso(artifact.created_at), "content": artifact.content, "evidence": artifact.evidence} for artifact in await Artifact.pending_for_brand(brand_id)],
+        "pending": [
+            {"id": artifact.id, "type": artifact.type, "created_at": utc_iso(artifact.created_at), "content": artifact.content, "evidence": artifact.evidence, **({"workstreams": receipts.plan_workstreams(artifact.content)} if artifact.type == "plan" else {})}
+            for artifact in await Artifact.pending_for_brand(brand_id)
+        ],
         "waiting_on_you": [{"id": task.id, "name": task.name, "days_waiting": (clock.now() - task.created_at).days if task.created_at else 0} for task in client_tasks],
     }
 
@@ -218,9 +302,12 @@ async def roadmap(brand_id: str) -> dict:
     await Brand.get(brand_id)
     plan = await Artifact.latest(brand_id, type="plan", statuses=[STATUS_APPROVED, STATUS_AUTO_APPROVED])
     draft_tasks = await Task.in_flight(brand_id, "content_draft")
+    # a workstream "needs you" while its client-data task (#25) still waits
+    study_waiting = {(task.payload or {}).get("workstream") for task in await Task.in_flight(brand_id, "collect_study_data")}
     return {
         "goals": [{"metric": goal.metric, "target": float(goal.target), "deadline": goal.deadline.isoformat() if goal.deadline else None} for goal in await Goal.active(brand_id)],
         "plan": plan.content if plan else None,
+        "workstreams": receipts.plan_workstreams(plan.content, needs_you_names={name for name in study_waiting if name}) if plan else [],
         "publishing_next": [{"title": (task.payload or {}).get("entry", {}).get("title")} for task in draft_tasks],
     }
 

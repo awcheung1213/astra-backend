@@ -219,6 +219,7 @@ async def test_audit_closes_twins_as_duplicate_and_counts_only_real_fixes(monkey
     monkeypatch.setattr(site_audit.Site, "by_brand", none)
     monkeypatch.setattr(site_audit, "_crawl", crawl)
     monkeypatch.setattr(site_audit.Finding, "open_for_brand", lambda brand_id: _async([newer, older]))
+    monkeypatch.setattr(site_audit.Finding, "fixed_by_change_for_brand", lambda brand_id: _async([]))
     monkeypatch.setattr(site_audit.Finding, "resolve", resolve)
     monkeypatch.setattr(site_audit, "queue_first_plan_when_ready", none)
     result = await site_audit.run_site_audit("b1")

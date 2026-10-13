@@ -3,6 +3,9 @@ import os
 from settings._env import env_int, env_required
 from settings.base import *  # noqa
 
+# no request bodies/headers in production logs unless LOG_LEVEL=DEBUG is set on purpose
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+
 # --- database (Railway Postgres) ---
 DATABASE_HOST = env_required("DATABASE_HOST")
 REPLICA_DATABASE_HOST = os.environ.get("REPLICA_DATABASE_HOST") or env_required("DATABASE_HOST")
