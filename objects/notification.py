@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -46,6 +46,25 @@ class Notification(SQLModel, BaseObject, table=True):
         await session.flush()
         await session.refresh(notification)
         return notification
+
+    @staticmethod
+    async def unread_change_notice(organization_id: str, since: datetime) -> "Notification | None":
+        """The newest still-unread change notice since `since` — a new change folds into it."""
+        rows = await Database.session.execute(
+            select(Notification)
+            .where(Notification.organization_id == organization_id, Notification.kind == KIND_UPDATE, Notification.read_at.is_(None), Notification.created_at >= since)  # type: ignore
+            .where(Notification.link_ref.like("change_sets/%") | Notification.link_ref.like("changes/%"))  # type: ignore
+            .order_by(Notification.created_at.desc())  # type: ignore
+            .limit(1)
+        )
+        return rows.scalars().first()
+
+    @staticmethod
+    async def mark_all_read(organization_id: str) -> int:
+        """Opening Pulse reads it: the badge clears."""
+        result = await Database.session.execute(update(Notification).where(Notification.organization_id == organization_id, Notification.read_at.is_(None)).values(read_at=clock.now()))  # type: ignore
+        await Database.session.flush()
+        return result.rowcount or 0
 
     @staticmethod
     async def for_organization(organization_id: str, limit: int = 50) -> list["Notification"]:

@@ -11,7 +11,13 @@ WRITE_TIMEOUT_SECONDS = 20.0
 class CmsWriteError(Exception):
     """A CMS write failed. Propagates out of change_set_apply so procrastinate
     retries (the completed-op markers make the retry resume); exhausted
-    retries dead-letter the task to the operator."""
+    retries dead-letter the task to the operator. status_code: the CMS's
+    HTTP status when it answered (None for transport errors) — lets connect
+    tell "wrong password" apart from "site down"."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 Checkpoint = Callable[[dict], Awaitable[None]]

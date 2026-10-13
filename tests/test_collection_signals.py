@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 import api.prompts as prompts_api
+import utils.prompt_signoff as prompt_signoff
 import worker.tasks.collection as collection
 import worker.tasks.research as research
 from schemas.prompt_schemas import SignoffRequest
@@ -93,8 +94,8 @@ async def test_signoff_enqueues_collection_via_create_task(monkeypatch):
         raise AssertionError("sign-off must not defer_async() (rule 8)")
 
     monkeypatch.setattr(prompts_api.Brand, "get", fake_brand_get)
-    monkeypatch.setattr(prompts_api.Prompt, "activate", fake_activate)
-    monkeypatch.setattr(prompts_api, "create_task", fake_create_task)
+    monkeypatch.setattr(prompt_signoff.Prompt, "activate", fake_activate)
+    monkeypatch.setattr(prompt_signoff, "create_task", fake_create_task)  # the shared sign-off path
     monkeypatch.setattr(collection.submit_prompt_execution_batch, "defer_async", forbidden_defer)
 
     response = await prompts_api.signoff_prompts("b1", SignoffRequest(prompt_ids=["p1", "p2"]))
@@ -127,16 +128,21 @@ async def test_submit_runs_under_task_lifecycle_when_enqueued_by_create_task(mon
 
 @pytest.fixture
 def research_harness(monkeypatch):
-    state: dict = {"created": [], "plans": [], "reply": []}
+    state: dict = {"created": [], "plans": [], "reply": [], "onboarded_at": None, "tracked": []}
 
     async def fake_brand_get(_):
-        return SimpleNamespace(id="b1", organization_id="o1", name="Ace", website_url="https://ace.example", category="plumbing", description="", audience="", footprint="local")
+        return SimpleNamespace(id="b1", organization_id="o1", name="Ace", website_url="https://ace.example", category="plumbing", description="", audience="", footprint="local", onboarded_at=state["onboarded_at"])
 
     async def fake_by_brand(_):
-        return [SimpleNamespace(text="Who fixes a leaking water heater?")]
+        return [SimpleNamespace(id="p0", text="Who fixes a leaking water heater?", is_active=False, retired_at=None, created_at=None)]
 
     async def fake_prompt_create(**fields):
         state["created"].append(fields["text"])
+        return SimpleNamespace(id=f"new{len(state['created'])}", is_active=False, retired_at=None, **fields)
+
+    async def fake_track(brand_id, prompts):
+        state["tracked"].append(prompt_signoff.default_tracked_prompt_ids(prompts))
+        return len(state["tracked"][-1])
 
     async def fake_first_plan(brand_id, task_id):
         state["plans"].append(task_id)
@@ -156,6 +162,7 @@ def research_harness(monkeypatch):
     monkeypatch.setattr(research, "queue_first_plan_when_ready", fake_first_plan)
     monkeypatch.setattr(research, "_gsc_top_queries", no_gsc)
     monkeypatch.setattr(research, "ClaudeAgent", FakeAgent)
+    monkeypatch.setattr(research, "track_default_prompts", fake_track)
     return state
 
 
@@ -169,6 +176,7 @@ async def test_research_prompts_dedupes_within_one_reply(research_harness):
     await research.research_prompts.func("t1", "b1")
     assert research_harness["created"] == ["best plumber near me", "plumber vs handyman for a clogged drain"]
     assert research_harness["plans"] == ["t1"]
+    assert research_harness["tracked"] == []  # pre-launch research: launch owns the default
 
 
 async def test_research_prompts_empty_reply_is_a_failed_parse(research_harness):

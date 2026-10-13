@@ -43,6 +43,11 @@ GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
 # deployed environments override both via env
 GOOGLE_OAUTH_REDIRECT_URL = os.environ.get("GOOGLE_OAUTH_REDIRECT_URL", "http://localhost:8000/api/v1/connections/google/callback")
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://localhost:5173")
+# where WordPress's authorize-application screen sends the browser back
+# (one-tap connect). WordPress demands https here unless the WP site itself
+# is a local install. Defaults to the Google callback's host, so a deployed
+# environment needs no new variable.
+WORDPRESS_CONNECT_CALLBACK_URL = os.environ.get("WORDPRESS_CONNECT_CALLBACK_URL") or GOOGLE_OAUTH_REDIRECT_URL.replace("/connections/google/callback", "/connections/wordpress/callback")
 
 
 TEST_URL = ""

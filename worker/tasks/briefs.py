@@ -90,7 +90,19 @@ CHASE_AFTER_DAYS = 3  # how long a client task may sit before the first nudge
 CHASE_COOLDOWN_DAYS = 3  # never nudge the same org more often than this
 CHASE_TITLE = "A gentle nudge from your Evergreen team"
 
-BRIEF_MAX_WORDS = 250
+# How the Brief AND the monthly report read (reports.py reuses it): the owner
+# reads the first few words on his phone and never a paragraph
+# (customer-persona.md) — one number-bearing line, then a few short bullets.
+OWNER_UPDATE_FORMAT = (
+    "FORMAT (the owner reads only the first few words, on his phone — follow it exactly):\n"
+    "- Line 1: one plain sentence under 12 words that contains a number: what we did or what changed.\n"
+    '- Then at most 5 bullets ("- "), each under 12 words, in plain everyday words.\n'
+    "- No jargon: never write schema, SEO, visibility score, share of voice, SoV, indexing, structured data,\n"
+    "  detection rate or findings. Say what it means for customers finding and calling them.\n"
+    '- A final bullet starting "Needs you:" ONLY when the facts show something waiting on the owner;\n'
+    "  otherwise leave it out.\n"
+    "- No headings, no tables, no paragraphs, nothing before line 1 or after the bullets.\n"
+)
 
 
 ##############################
@@ -263,12 +275,14 @@ def change_set_outcome(change_set, revert_set_ids: set[str]) -> str:
 
 def _brief_prompt(brand: Brand, facts: dict) -> str:
     return (
-        f"Write this week's Brief for the client below, in markdown, under {BRIEF_MAX_WORDS} words.\n"
-        "Lead with what changed. Use ONLY the facts provided — if a section has no data yet, say so in one\n"
-        "plain sentence rather than inventing anything. Close with what (if anything) you need from them.\n"
+        "Write this week's Brief for the client below, in markdown.\n"
+        "Lead with what changed. Use ONLY the facts provided — if something has no data yet, say so plainly\n"
+        "in a short bullet (or leave it out) rather than inventing anything.\n"
         "The work facts say what actually happened: a draft was not sent, posted or published, an undone\n"
         "change is not a change, and nothing is live or managed on a service the facts say is not connected.\n"
-        "Only waiting_on_your_approval_now says what awaits their approval; quote its counts exactly.\n\n"
+        "Only waiting_on_your_approval_now says what awaits their approval; quote its counts exactly.\n"
+        "Something waits on the owner when waiting_on_your_approval_now or waiting_on_client is not empty.\n\n"
+        f"{OWNER_UPDATE_FORMAT}\n"
         f"Brand: {brand.name} ({brand.website_url})\n\n"
         f"Facts:\n{json.dumps(facts, indent=2, default=str)}"
     )

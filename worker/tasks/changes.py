@@ -19,6 +19,8 @@ The writes themselves live in adapters/cms/ (rule 6 — the only door to the
 outside world); a platform not in APPLY_ENABLED_PLATFORMS still gets its
 change set recorded at approval (durable, pending), just never enqueued."""
 
+from datetime import timedelta
+
 from sqlalchemy import select
 
 from adapters.cms.common import Checkpoint, CmsWriteError
@@ -30,9 +32,10 @@ from objects.change_set import STATUS_APPLIED, STATUS_APPLYING, STATUS_REVERTED,
 from objects.finding import STATUS_FIXED, STATUS_OPEN, Finding
 from objects.notification import KIND_UPDATE, Notification
 from objects.site import Site
+from utils import clock
 from utils.database import Database
 from utils.logger import logger
-from utils.receipts import change_notification_text, finding_fix_transition, live_fix_change_set_id, proposal_finding_ids, reopened_detail, resolved_detail
+from utils.receipts import CHANGE_NOTICE_BATCH_HOURS, batched_change_notice, change_notification_text, finding_fix_transition, live_fix_change_set_id, proposal_finding_ids, reopened_detail, resolved_detail
 from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
 
@@ -73,7 +76,14 @@ async def change_set_apply(task_id: str, brand_id: str) -> None:
             artifact = await Database.session.get(Artifact, change_set.artifact_id)
             original = await _reverted_original(change_set.id)
             title, body = change_notification_text(change_set, artifact, original)
-            await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title=title, body=body, link_ref=f"change_sets/{change_set.id}")
+            unread = await Notification.unread_change_notice(brand.organization_id, since=clock.now() - timedelta(hours=CHANGE_NOTICE_BATCH_HOURS))
+            if unread is not None:
+                unread.title, unread.body, unread.link_ref = batched_change_notice(unread.title, unread.body, unread.link_ref, title, change_set.id)
+                unread.created_at = clock.now()
+                Database.session.add(unread)
+                await Database.session.flush()
+            else:
+                await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title=title, body=body, link_ref=f"change_sets/{change_set.id}")
 
 
 async def sync_findings_with_fix(artifact_id: str) -> list[tuple[str, str]]:

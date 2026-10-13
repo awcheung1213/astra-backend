@@ -18,6 +18,7 @@ from utils import clock
 from utils.agent_json import parse_agent_json
 from utils.first_plan import queue_first_plan_when_ready
 from utils.logger import logger
+from utils.prompt_signoff import track_default_prompts
 from utils.query_normalization import query_hash
 from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
@@ -46,15 +47,21 @@ async def research_prompts(task_id: str, brand_id: str) -> None:
         if not isinstance(generated, list) or not generated or not all(isinstance(entry, dict) and entry.get("text") and entry.get("category") for entry in generated):
             raise ValueError(f"prompt research output is not a list of text+category entries: {agent_output[:200]}")
 
-        created_count = 0
+        created_prompts: list[Prompt] = []
+        ranked_at = clock.now()  # the reply's order is its rank: stamped 1µs apart so created_at keeps it
         for entry in generated:
             entry_query_hash = query_hash(entry["text"])
             if entry_query_hash in existing_query_hashes:
                 continue  # never duplicates a prompt the brand already has — nor one earlier in this reply
-            await Prompt.create(brand_id=brand.id, text=entry["text"], category=entry["category"])
+            created_prompts.append(await Prompt.create(brand_id=brand.id, text=entry["text"], category=entry["category"], created_at=ranked_at + timedelta(microseconds=len(created_prompts))))
             existing_query_hashes.add(entry_query_hash)
-            created_count += 1
-        logger.info(f"[research] brand {brand.id}: {created_count} prompts generated (inactive, awaiting sign-off), {len(generated) - created_count} duplicates skipped")
+        logger.info(f"[research] brand {brand.id}: {len(created_prompts)} prompts generated (inactive, awaiting sign-off), {len(generated) - len(created_prompts)} duplicates skipped")
+
+        # landed after launch with nothing tracked: launch had nothing to sign
+        # off, so the default happens here (re-read — launch may have landed
+        # while the agent ran; committed rows + this run's new ones)
+        if (await Brand.get(brand_id)).onboarded_at is not None:
+            await track_default_prompts(brand.id, await Prompt.by_brand(brand.id) + created_prompts)
         await queue_first_plan_when_ready(brand.id, task_id)
 
 
@@ -134,7 +141,8 @@ def _research_prompt(brand: Brand, existing_prompts: list[Prompt], real_queries:
     existing_lines = "\n".join(f"- {existing.text}" for existing in existing_prompts) or "(none yet)"
     demand_lines = "\n".join(f"- {top_query['query']} ({top_query['clicks']} clicks)" for top_query in real_queries) or "(no Search Console data yet — generate from the brand context alone)"
     return (
-        f"Generate {TARGET_PROMPT_COUNT} consumer questions for the brand's category below.\n"
+        f"Generate {TARGET_PROMPT_COUNT} consumer questions for the brand's category below,\n"
+        "ordered most-asked first (the first few are the ones we track by default).\n"
         "Ground them in the REAL search demand listed — the questions behind those queries — but phrase them\n"
         "the way someone asks an AI assistant, not a search box.\n"
         "Do NOT restate or trivially rephrase the existing prompts listed — only genuinely new angles.\n\n"

@@ -26,8 +26,12 @@ class Prompt(SQLModel, BaseObject, table=True):
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
-    async def create(brand_id: str, text: str, category: str, source: str = "generated", is_active: bool = False) -> "Prompt":
+    async def create(brand_id: str, text: str, category: str, source: str = "generated", is_active: bool = False, created_at: datetime | None = None) -> "Prompt":
+        """created_at: research stamps its reply order (most-asked first) so
+        the rank survives — one transaction's now() would tie every row."""
         prompt = Prompt(brand_id=brand_id, text=text, category=category, source=source, is_active=is_active)
+        if created_at is not None:
+            prompt.created_at = created_at
         session = Database.session
         session.add(prompt)
         await session.flush()

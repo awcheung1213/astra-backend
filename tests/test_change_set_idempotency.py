@@ -129,6 +129,11 @@ def engine(monkeypatch):
     monkeypatch.setattr(changes, "task_lifecycle", fake_lifecycle)
     monkeypatch.setattr(changes, "ADAPTER_BY_PLATFORM", {"wordpress": FakeAdapter})
     monkeypatch.setattr(changes.Notification, "create", staticmethod(fake_notify))
+
+    async def no_unread_notice(organization_id, since):
+        return None  # every apply in these tests starts a fresh notice
+
+    monkeypatch.setattr(changes.Notification, "unread_change_notice", staticmethod(no_unread_notice))
     monkeypatch.setattr(changes.Brand, "get", staticmethod(fake_brand))
     monkeypatch.setattr(changes.Site, "get", staticmethod(fake_site))
 

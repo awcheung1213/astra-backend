@@ -129,7 +129,8 @@ async def test_competitor_add_rejects_the_own_brand(client):
 
 async def test_launch_skips_client_tasks_the_wizard_already_delivered(client, monkeypatch):
     """Site connected and GA4 picked during the wizard: launch must not nag
-    for grant_access or verify_conversion_tracking; upload_photos still is."""
+    for grant_access; verify_conversion_tracking stays owed (GA4 doesn't
+    count calls or form fills yet) and so does upload_photos."""
     _stub_extraction(monkeypatch)
 
     async def verify(self):
@@ -144,6 +145,6 @@ async def test_launch_skips_client_tasks_the_wizard_already_delivered(client, mo
 
     body = (await client.post(f"/api/v1/brands/{brand_id}/launch")).json()
     assert "grant_access" not in body["client_tasks"]
-    assert "verify_conversion_tracking" not in body["client_tasks"]
+    assert "verify_conversion_tracking" in body["client_tasks"]  # GA4 alone can't count calls/forms
     assert "upload_photos" in body["client_tasks"]
     assert "answer_sme_interview" in body["client_tasks"]  # the interview was skipped, so it is still owed

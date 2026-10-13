@@ -483,3 +483,24 @@ def test_page_label_reads_as_words():
 def test_plan_outcome_is_one_sentence():
     rows = receipts.plan_workstreams({"workstreams": [{"name": "Fix the site", "expected_impact": "Six problems closed. Then more detail nobody reads."}]})
     assert rows[0]["outcome"] == "Six problems closed."
+
+
+def test_research_and_audit_rows_open_their_screen():
+    assert receipts.audit_outcome(SimpleNamespace(id="a", finished_at=NOW), 6, is_first=True)["ref"] == {"type": "screen", "id": "audit"}
+    questions = receipts.research_outcome(SimpleNamespace(id="q", name="research_prompts", finished_at=NOW), 15)
+    assert questions["ref"] == {"type": "screen", "id": "questions"}
+    competitors = receipts.research_outcome(SimpleNamespace(id="c", name="research_competitors", finished_at=NOW), 12)
+    assert competitors["title"] == "Found the businesses AI assistants name alongside you" and "12" not in competitors["title"]
+
+
+def test_change_notices_batch_into_one():
+    title, body, link = receipts.batched_change_notice("Added a business card for search engines to your homepage", "Live now.", "change_sets/a", "Added a business card for search engines to your contact page", "b")
+    assert title == "We made 2 changes to your site" and link == "changes/a,b"
+    assert body.splitlines() == ["- Added a business card for search engines to your homepage", "- Added a business card for search engines to your contact page"]
+    title, body, link = receipts.batched_change_notice(title, body, link, "Undid the change to your about page", "c")
+    assert title == "We made 3 changes to your site" and link == "changes/a,b,c" and body.splitlines()[-1] == "- Undid the change to your about page"
+
+
+def test_business_card_change_links_to_a_checker():
+    entry = receipts.describe_operation({"op": "set_field", "field": "content", "target": "https://reyes.example/", "previous_value": "<p>Hi</p>", "value": '<p>Hi</p><script type="application/ld+json">{"@type":"Organization","name":"Reyes"}</script>'})
+    assert entry["check_url"] == "https://validator.schema.org/#url=https%3A%2F%2Freyes.example%2F"

@@ -19,7 +19,7 @@ from utils.agent_prompts import ROLE_ACCOUNT_MANAGER
 from utils.logger import logger
 from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
-from worker.tasks.briefs import CHANGE_LIVE, change_set_outcome, completed_task_counts, overdue_client_tasks, work_facts
+from worker.tasks.briefs import CHANGE_LIVE, OWNER_UPDATE_FORMAT, change_set_outcome, completed_task_counts, overdue_client_tasks, work_facts
 
 
 @app.task(name="monthly_report", queue="reports", retry=RETRY_WITH_BACKOFF)
@@ -48,9 +48,6 @@ async def monthly_report(task_id: str, brand_id: str) -> None:
 
         report = await Report.create(brand_id=brand.id, period=period, narrative=narrative, metrics=facts, published_at=clock.now())
         await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title="Your monthly report is ready", link_ref=f"reports/{report.id}")
-
-
-REPORT_MAX_WORDS = 600
 
 
 def _previous_month_start() -> date:
@@ -106,12 +103,14 @@ async def _assemble_report_facts(brand: Brand, period: date) -> dict:
 
 def _report_prompt(brand: Brand, period: date, facts: dict) -> str:
     return (
-        f"Write the monthly report for the client below covering {period.strftime('%B %Y')}, in markdown,\n"
-        f"under {REPORT_MAX_WORDS} words. Structure it: what changed (lead with it, good or bad), what we\n"
-        "shipped, what's next, and what (if anything) we need from them. Use ONLY the facts provided — if a\n"
-        "section has no data yet, say so in one plain sentence rather than inventing anything. The work facts\n"
-        "say what actually happened: a draft was not sent, posted or published, an undone change is not a\n"
-        "change, and nothing is live or managed on a service the facts say is not connected.\n\n"
+        f"Write the monthly report for the client below covering {period.strftime('%B %Y')}, in markdown.\n"
+        "Lead with what changed, good or bad; pick the bullets from what changed, what we shipped and what's\n"
+        "next. Use ONLY the facts provided — if something has no data yet, say so plainly in a short bullet\n"
+        "(or leave it out) rather than inventing anything.\n"
+        "The work facts say what actually happened: a draft was not sent, posted or published, an undone\n"
+        "change is not a change, and nothing is live or managed on a service the facts say is not connected.\n"
+        "Something waits on the owner when waiting_on_client is not empty.\n\n"
+        f"{OWNER_UPDATE_FORMAT}\n"
         f"Brand: {brand.name} ({brand.website_url})\n\n"
         f"Facts:\n{json.dumps(facts, indent=2, default=str)}"
     )

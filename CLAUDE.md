@@ -102,7 +102,7 @@ bearer tokens verified locally (utils/token_verifier.py), ONE router-level
 one org per user on users.organization_id, `GET /me` bootstrap; local dev +
 tests borrow the geoviz STAGING Supabase project via .env (tests sign in as
 a dedicated runner, tests/_auth.py). Public exceptions (no bearer): Google
-OAuth callback (HMAC state is its auth) + review webhook, which is
+OAuth callback + WordPress one-tap callback (HMAC state is their auth) + review webhook, which is
 HMAC-authenticated (api/webhooks.py: `X-Evergreen-Signature` = hex
 HMAC-SHA256(`WEBHOOK_SECRET`, raw body), bare or `sha256=`-prefixed,
 constant-time, checked before parse; 401 otherwise; `WEBHOOK_SECRET` required

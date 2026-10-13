@@ -12,7 +12,7 @@ customer-persona.md (the Marco test): plain words a plumber understands. Never
 import json
 import re
 from datetime import datetime
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, STATUS_PENDING_REVIEW, STATUS_REJECTED, STATUS_SUPERSEDED
 from objects.change_set import STATUS_APPLIED, STATUS_FAILED, STATUS_REVERTED
@@ -423,6 +423,14 @@ def _plain(value) -> str | None:
     return truncate(visible_text(str(value)))
 
 
+def card_check_url(url: str | None) -> str | None:
+    """Proof Marco can open for a change visitors can't see: the schema.org
+    validator reads the live page and lists the card (name, site, description).
+    Not Google's Rich Results Test — it only reports rich-result types and
+    shows "No items detected" for a plain Organization card."""
+    return f"https://validator.schema.org/#url={quote(url, safe='')}" if is_url(url) else None
+
+
 def describe_operation(operation: dict, page_url: str | None = None) -> dict:
     """One entry of the change detail: page, what changed in a plain sentence,
     short plain before/after (never raw HTML), and whether visitors see it."""
@@ -435,7 +443,7 @@ def describe_operation(operation: dict, page_url: str | None = None) -> dict:
     if op == "set_field" and field in CONTENT_FIELDS:
         card = card_change(previous, value)
         if card == "added":
-            return {**entry, "what": "Added a business card for search engines", "before": None, "after": business_card_words(ld_json_blocks(value)), "visible_to_visitors": False}
+            return {**entry, "what": "Added a business card for search engines", "before": None, "after": business_card_words(ld_json_blocks(value)), "visible_to_visitors": False, "check_url": card_check_url(url)}
         if card == "removed":
             return {**entry, "what": "Removed the business card for search engines", "before": business_card_words(ld_json_blocks(previous)), "after": None, "visible_to_visitors": False}
         before, after = _changed_part(visible_text(previous) if isinstance(previous, str) else None, visible_text(value) if isinstance(value, str) else None)
@@ -562,6 +570,24 @@ def change_notification_text(change_set, artifact, original=None) -> tuple[str, 
     return title, body
 
 
+CHANGE_NOTICE_BATCH_HOURS = 12  # Marco test #11: one Pulse notice per batch of changes, not one per change
+
+
+def batched_change_notice(previous_title: str, previous_body: str | None, previous_link_ref: str | None, title: str, change_set_id: str) -> tuple[str, str, str]:
+    """Fold one more finished change into a still-unread change notice:
+    "We made 3 changes to your site" + one bullet per change, linking to the
+    change list. Pure."""
+    if (previous_link_ref or "").startswith("changes/"):
+        headlines = [line[2:] for line in (previous_body or "").splitlines() if line.startswith("- ")]
+        ids = previous_link_ref.split("/", 1)[1].split(",")
+    else:
+        headlines = [previous_title]
+        ids = [(previous_link_ref or "").split("/", 1)[-1]]
+    headlines.append(title)
+    ids.append(change_set_id)
+    return f"We made {len(headlines)} changes to your site", "\n".join(f"- {headline}" for headline in headlines), "changes/" + ",".join(id_ for id_ in ids if id_)
+
+
 ##############################
 # DONE FOR YOU (outcomes only)
 ##############################
@@ -643,17 +669,19 @@ def audit_outcome(task, new_findings: int, is_first: bool) -> dict:
         title = f"Checked your website for problems: found {new_findings}"
     else:
         title = f"Checked your website for problems: found {new_findings} new"
-    return {"id": task.id, "kind": "audit", "title": title, "when": task.finished_at, "ref": _ref(None, None)}
+    return {"id": task.id, "kind": "audit", "title": title, "when": task.finished_at, "ref": _ref("screen", "audit")}
 
 
 def research_outcome(task, created: int) -> dict | None:
     if task.name == "research_prompts":
         title = f"Found {created} questions your customers ask" if created else "Looked for new questions your customers ask: none new"
-    elif task.name == "research_competitors":
-        title = f"Found {created} competitors" if created else "Checked your competitors: no new ones"
-    else:
-        return None
-    return {"id": task.id, "kind": "research", "title": title, "when": task.finished_at, "ref": _ref(None, None)}
+        return {"id": task.id, "kind": "research", "title": title, "when": task.finished_at, "ref": _ref("screen", "questions")}
+    if task.name == "research_competitors":
+        # no count: the list keeps growing as AI answers name new businesses,
+        # so "found 12" would contradict the 15 on the home screen
+        title = "Found the businesses AI assistants name alongside you" if created else "Checked your competitors: no new ones"
+        return {"id": task.id, "kind": "research", "title": title, "when": task.finished_at, "ref": _ref("screen", "home")}
+    return None
 
 
 def report_outcome(report) -> dict:

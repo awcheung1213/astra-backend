@@ -9,8 +9,9 @@ no dedupe checks are needed: the interview owns the research pair (research
 grounds in the extraction, so it fires when the interview lands — at signup
 time normally, or later from Tasks if it was skipped, which the daily chase
 nags for; a post-launch EDIT of an answered interview updates facts only,
-DEC-024), and launch owns plan_update + site_audit + the client-task rows,
-single-shot behind its 409.
+DEC-024), and launch owns plan_update + site_audit + the client-task rows + the
+default question sign-off (utils/prompt_signoff.py), single-shot behind its
+409.
 
 Auth rides the router-level guard (utils/authz.py): signup requires only a
 valid token (the caller has no org yet — signup is what claims one, exactly
@@ -25,11 +26,11 @@ from constants.constants import MAX_FOOTPRINT_CITIES, US_STATE_ABBREVS
 from objects.approval_setting import ApprovalSetting
 from objects.brand import FOOTPRINT_LOCAL, Brand
 from objects.brand_market import BrandMarket
-from objects.connection import Connection
 from objects.goal import Goal
 from objects.market import Market
 from objects.organization import Organization
-from objects.site import STATUS_CONNECTED, Site
+from objects.prompt import Prompt
+from objects.site import Site
 from objects.task import STATUS_DONE, Task
 from objects.user import User
 from schemas.onboarding_schemas import InterviewRequest, InterviewResponse, LaunchRequest, LaunchResponse, SignupRequest, SignupResponse
@@ -38,6 +39,7 @@ from utils.agent_prompts import ROLE_ACCOUNT_MANAGER
 from utils.authz import current_user
 from utils.database import Database
 from utils.first_plan import queue_first_plan_when_ready
+from utils.prompt_signoff import track_default_prompts
 from utils.task_queue import create_task
 
 router = APIRouter(prefix="/api/v1")
@@ -159,14 +161,20 @@ async def launch(brand_id: str, request: LaunchRequest | None = None) -> LaunchR
     for work_name, work_queue in LAUNCH_WORK:
         await create_task(brand_id=brand.id, name=work_name, queue=work_queue)
 
-    # #6 — the baseline is the normal weekly machinery started early: the
-    #       prompt sign-off endpoint (api/prompts.py) defers the first fill
-    #       once the human activates prompts; Sunday's visibility_run scores it.
+    # #6 — the baseline is the normal weekly machinery started early. The
+    #       backend owns the default: with nothing tracked yet, the top
+    #       DEFAULT_TRACKED_QUESTIONS researched questions are signed off here
+    #       (the shared sign-off path queues the first fill); research landing
+    #       after launch does the same (worker/tasks/research.py). Sunday's
+    #       visibility_run scores it.
+    default_tracked = await track_default_prompts(brand.id, await Prompt.by_brand(brand.id))
     # TODO(#7, config half): GA4 events + call-tracking config needs the Google
     #       adapter; until then only the client verification task row exists.
 
     await Brand.update(brand.id, onboarded_at=clock.now(), approval_preset=request.approval_preset or brand.approval_preset)
     queued_work = [work_name for work_name, _ in LAUNCH_WORK]
+    if default_tracked:
+        queued_work.append("submit_prompt_execution_batch")
     if await queue_first_plan_when_ready(brand.id):
         queued_work.append("plan_update")  # nothing else in flight (e.g. interview skipped): plan now
     return LaunchResponse.create({"brand_id": brand.id, "client_tasks": client_tasks_created, "queued_work": queued_work})
@@ -175,17 +183,16 @@ async def launch(brand_id: str, request: LaunchRequest | None = None) -> LaunchR
 async def _client_tasks_already_satisfied(brand: Brand) -> set[str]:
     """The onboarding client tasks the wizard's optional steps already
     delivered. Each condition mirrors what closes the task later: the
-    interview answers, a connected site (the same test connect_site closes
-    grant_access on), and a connected GA4 property for conversion tracking.
-    upload_photos has no in-app path, so it is always created."""
+    interview answers and a connected site (the same test connect_site closes
+    grant_access on). upload_photos has no in-app path, so it is always
+    created. verify_conversion_tracking is too: a connected GA4 property
+    does not count calls or form fills (lead ingestion in api/webhooks.py is
+    still a TODO), so marking it done would claim tracking that isn't there."""
     satisfied: set[str] = set()
     if brand.interview_raw:
         satisfied.add("answer_sme_interview")
     if await Site.by_brand(brand.id) is not None:
         satisfied.add("grant_access")
-    ga4_connection = await Connection.get_for_brand_provider(brand.id, "ga4")
-    if ga4_connection is not None and ga4_connection.status == STATUS_CONNECTED:
-        satisfied.add("verify_conversion_tracking")
     return satisfied
 
 

@@ -9,7 +9,8 @@ e2e 2026-09-15, gap 6).
 Auth rides the router-level guard (utils/authz.py) — these routes accept
 secrets, which is why the guard had to land before any public deploy. The
 Google callback lives on public_router: Google's browser redirect carries no
-bearer token, so its HMAC-signed state IS the auth."""
+bearer token, so its HMAC-signed state IS the auth. WordPress one-tap's
+callback lives there too, for the same reason."""
 
 import base64
 import hashlib
@@ -18,7 +19,7 @@ import json
 import re
 import time
 import uuid
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import RedirectResponse
@@ -32,14 +33,14 @@ from objects.connection import Connection
 from objects.site import STATUS_CONNECTED, STATUS_DISCONNECTED, STATUS_ERROR, STATUS_PENDING, Site
 from objects.task import STATUS_DONE, Task
 from schemas.base_schemas import utc_iso
-from schemas.connection_schemas import ConnectionsResponse, PickPropertyRequest, ProviderStatusResponse, SiteConnectRequest, SiteStatusResponse
+from schemas.connection_schemas import ConnectionsResponse, PickPropertyRequest, ProviderStatusResponse, SiteConnectRequest, SiteStatusResponse, WordPressAuthorizeRequest
 from utils.logger import logger
 from utils.token_crypto import decrypt_credentials, encrypt_credentials
 from worker.tasks.changes import ADAPTER_BY_PLATFORM
 
 router = APIRouter(prefix="/api/v1")
-# registered WITHOUT the auth guard (main.py): Google's browser redirect
-# carries no bearer token — the HMAC-signed state IS the auth
+# registered WITHOUT the auth guard (main.py): Google's and WordPress's
+# browser redirects carry no bearer token — the HMAC-signed state IS the auth
 public_router = APIRouter(prefix="/api/v1")
 
 REQUIRED_CREDENTIAL_KEYS = {
@@ -67,29 +68,52 @@ async def connect_site(brand_id: str, request: SiteConnectRequest) -> SiteStatus
     if request.platform not in REQUIRED_CREDENTIAL_KEYS:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"platform must be one of {sorted(REQUIRED_CREDENTIAL_KEYS)}")
     credentials = _normalized_credentials(request.platform, request.credentials)
+    try:
+        site = await connect_verified_site(brand.id, request.platform, credentials)
+    except CmsWriteError as error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=verify_failure_detail(request.platform, error))
+    return _site_status(site)
+
+
+async def connect_verified_site(brand_id: str, platform: str, credentials: dict) -> Site:
+    """The ONE verify-then-store path — manual connect and WordPress one-tap
+    both land here with normalized credentials. Raises CmsWriteError when the
+    live verify fails (after recording the error, unless a working
+    connection is already on file)."""
     encrypted = encrypt_credentials(credentials)
 
     # verify with the SAME adapter that will later write through these
     # credentials — an unsaved probe row, so nothing persists on failure
-    probe = Site(brand_id=brand.id, platform=request.platform, credentials_encrypted=encrypted)
+    probe = Site(brand_id=brand_id, platform=platform, credentials_encrypted=encrypted)
     try:
-        await ADAPTER_BY_PLATFORM[request.platform](probe).verify()  # type: ignore[attr-defined]
-    except CmsWriteError as error:
+        await ADAPTER_BY_PLATFORM[platform](probe).verify()  # type: ignore[attr-defined]
+    except CmsWriteError:
         # a failed RE-connect must not clobber a working connection
-        existing = await Site.any_for_brand(brand.id)
+        existing = await Site.any_for_brand(brand_id)
         if existing is None or existing.status != STATUS_CONNECTED:
-            await Site.upsert_for_brand(brand.id, request.platform, STATUS_ERROR, credentials_encrypted=None)
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"could not verify the connection: {error}")
+            await Site.upsert_for_brand(brand_id, platform, STATUS_ERROR, credentials_encrypted=None)
+        raise
 
-    site = await Site.upsert_for_brand(brand.id, request.platform, STATUS_CONNECTED, credentials_encrypted=encrypted)
-    await Brand.update(brand.id, platform=request.platform)
+    site = await Site.upsert_for_brand(brand_id, platform, STATUS_CONNECTED, credentials_encrypted=encrypted)
+    await Brand.update(brand_id, platform=platform)
 
     # the connection IS what grant_access asked for — stop the daily chase
-    grant_access_task = await Task.first_queued(brand.id, "grant_access")
+    grant_access_task = await Task.first_queued(brand_id, "grant_access")
     if grant_access_task is not None:
         await Task.update_status(grant_access_task.id, STATUS_DONE)
+    return site
 
-    return _site_status(site)
+
+WORDPRESS_REJECTED_DETAIL = "WordPress didn't accept that. Use an application password, not your login password."
+
+
+def verify_failure_detail(platform: str, error: CmsWriteError) -> str:
+    """What the owner reads when verify fails: WordPress refusing the
+    credentials (401/403) is almost always a login password pasted where an
+    application password goes — say so plainly instead of the raw API text. Pure."""
+    if platform == PLATFORM_WORDPRESS and error.status_code in (401, 403):
+        return WORDPRESS_REJECTED_DETAIL
+    return f"could not verify the connection: {error}"
 
 
 @router.delete("/brands/{brand_id}/site", response_model=SiteStatusResponse)
@@ -213,6 +237,9 @@ async def google_callback(state: str = "", code: str = "", error: str = "") -> R
         logger.error("google callback with invalid state — rejected")
         return back("gsc", "error")
     brand_id, provider = decoded["brand_id"], decoded["provider"]
+    if provider not in GOOGLE_PROVIDER_SCOPES:
+        logger.error(f"brand {brand_id}: google callback with a {provider} state — rejected")
+        return back("gsc", "error")
     if error:
         # access_denied is user/app-policy specific (declined consent, a
         # Workspace admin block, or a Testing-status app missing this test
@@ -305,6 +332,110 @@ async def _google_connection(brand_id: str, provider: str) -> Connection:
     if connection is None or not connection.credentials_encrypted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"no {provider} consent on file — connect first")
     return connection
+
+
+##############################
+# WORDPRESS ONE-TAP (application-password authorization screen)
+##############################
+# WordPress core's own approval screen mints the application password:
+# {site}/wp-admin/authorize-application.php shows "Evergreen wants access",
+# the owner taps Approve, and WordPress redirects the browser to success_url
+# with site_url + user_login + password in the query (or to reject_url with
+# success=false). No password to find or paste. Like Google's, the callback
+# is PUBLIC and its HMAC-signed state (mint_state/verify_state, provider
+# "wordpress") is the auth; the credentials then take the SAME
+# verify-then-store path as a manual connect. The password is never logged
+# (the access log + request log redact it: middleware/logging_middleware.py).
+
+WORDPRESS_APP_NAME = "Evergreen"
+WORDPRESS_APP_ID = "64a3f977-cf3b-4db4-a43b-31997b82b6ca"  # stable: WordPress groups the owner's app passwords by it
+WORDPRESS_RESULTS = ("connected", "rejected", "failed", "expired")
+
+
+def normalize_wordpress_site_url(site_url: str, fallback: str) -> str:
+    """The WordPress install's base URL from what the owner typed (blank ->
+    the brand's website): scheme defaulted to https, query/fragment and any
+    pasted /wp-admin or /wp-login.php tail dropped, no trailing slash. '' when
+    there is nothing to go on. Pure."""
+    raw = (site_url or "").strip() or (fallback or "").strip()
+    if not raw:
+        return ""
+    if not re.match(r"^https?://", raw, flags=re.IGNORECASE):
+        raw = f"https://{raw}"
+    parsed = urlsplit(raw)
+    path = re.split(r"/wp-(?:admin|login\.php)\b", parsed.path, maxsplit=1)[0].rstrip("/")
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+
+
+def wordpress_authorize_url(site_url: str, state: str, callback_url: str) -> str:
+    """WordPress's authorize-application screen for this site, approving or
+    rejecting back to the callback with the signed state. Pure."""
+    callback = f"{callback_url}?{urlencode({'state': state})}"
+    params = {"app_name": WORDPRESS_APP_NAME, "app_id": WORDPRESS_APP_ID, "success_url": callback, "reject_url": callback}
+    return f"{site_url}/wp-admin/authorize-application.php?{urlencode(params, quote_via=quote)}"
+
+
+def wordpress_return_url(result: str) -> str:
+    """Where the callback bounces the browser: the dashboard's Connect screen
+    with the outcome (mirrors Google's back()). Pure."""
+    return f"{settings.DASHBOARD_URL}/?screen=connect&wordpress=1&result={result}"
+
+
+def wordpress_state_brand(state: str) -> tuple[str, str | None]:
+    """("ok", brand_id) for a valid WordPress state; ("expired", brand_id)
+    for an authentic one past its TTL; ("invalid", None) for anything else —
+    tampered, garbage, or a Google state replayed here. Pure."""
+    decoded = verify_state(state)
+    if decoded is not None and decoded.get("provider") == PLATFORM_WORDPRESS:
+        return "ok", decoded["brand_id"]
+    stale = verify_state(state, ignore_exp=True)
+    if stale is not None and stale.get("provider") == PLATFORM_WORDPRESS:
+        return "expired", stale["brand_id"]
+    return "invalid", None
+
+
+@router.post("/brands/{brand_id}/site/wordpress/authorize")
+async def wordpress_authorize(brand_id: str, request: WordPressAuthorizeRequest | None = None) -> dict:
+    """Returns WordPress's approval-screen URL; the SPA navigates to it.
+    A blank site_url means the brand's own website."""
+    brand = await Brand.get(brand_id)
+    site_url = normalize_wordpress_site_url((request or WordPressAuthorizeRequest()).site_url, brand.website_url)
+    if not site_url:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="site_url is required")
+    return {"url": wordpress_authorize_url(site_url, mint_state(brand.id, PLATFORM_WORDPRESS), settings.WORDPRESS_CONNECT_CALLBACK_URL)}
+
+
+@public_router.get("/connections/wordpress/callback")
+async def wordpress_callback(state: str = "", success: str = "", site_url: str = "", user_login: str = "", password: str = "") -> RedirectResponse:
+    """WordPress's browser redirect after Approve/Reject — the signed state is
+    the auth. Approved credentials run the manual connect's verify-then-store
+    path; the browser lands back on the Connect screen with the outcome."""
+
+    def back(result: str) -> RedirectResponse:
+        return RedirectResponse(wordpress_return_url(result), status_code=status.HTTP_302_FOUND)
+
+    state_status, brand_id = wordpress_state_brand(state)
+    if state_status == "expired":
+        logger.info(f"brand {brand_id}: wordpress callback with expired state — asking for a retry")
+        return back("expired")
+    if state_status != "ok" or brand_id is None:
+        logger.error("wordpress callback with invalid state — rejected")
+        return back("failed")
+    if success == "false" or not (site_url.strip() and user_login.strip() and password.strip()):
+        logger.info(f"brand {brand_id}: wordpress approval declined or incomplete")
+        return back("rejected")
+
+    credentials = _normalized_credentials(PLATFORM_WORDPRESS, {"base_url": site_url, "username": user_login, "app_password": password})
+    try:
+        await connect_verified_site(brand_id, PLATFORM_WORDPRESS, credentials)
+    except CmsWriteError as error:
+        logger.error(f"brand {brand_id}: wordpress one-tap verify failed: {error}")
+        return back("failed")
+    except Exception as exc:
+        logger.error(f"brand {brand_id}: wordpress callback failed: {type(exc).__name__}")
+        return back("failed")
+    logger.info(f"brand {brand_id}: wordpress connected via one-tap ({credentials['base_url']})")
+    return back("connected")
 
 
 def _normalized_credentials(platform: str, credentials: dict) -> dict:

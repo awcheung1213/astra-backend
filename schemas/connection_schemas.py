@@ -9,6 +9,10 @@ class SiteConnectRequest(BaseRequest):
     credentials: dict
 
 
+class WordPressAuthorizeRequest(BaseRequest):
+    site_url: str = ""  # blank = the brand's website_url
+
+
 class PickPropertyRequest(BaseRequest):
     # gsc: a siteUrl ("sc-domain:example.com" / "https://example.com/");
     # ga4: a numeric property id

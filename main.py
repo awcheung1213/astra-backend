@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -7,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import bootstrap  # noqa
 from middleware.database_session_middleware import DatabaseSessionMiddleware
 from middleware.internal_server_error_middleware import InternalServerErrorMiddleware
-from middleware.logging_middleware import LoggingMiddleware
+from middleware.logging_middleware import LoggingMiddleware, RedactAccessLogFilter
 from middleware.trace_middleware import TraceMiddleware
 from schemas.index_schemas import IndexResponse
 from settings import CORS_ORIGINS, ENVIRONMENT, PROJECT_NAME, REGION, VERSION
@@ -30,6 +31,7 @@ app = FastAPI(
 )
 
 logger.info(f"boot: service=api env={ENVIRONMENT}")
+logging.getLogger("uvicorn.access").addFilter(RedactAccessLogFilter())  # one-tap WordPress's password rides a query string
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,7 +55,6 @@ from api.prompts import router as prompts_router  # noqa: E402
 from api.reads import router as reads_router  # noqa: E402
 from api.webhooks import router as webhooks_router  # noqa: E402
 from utils.authz import guard  # noqa: E402
-
 
 GUARDED = [Depends(guard)]
 app.include_router(approvals_router, dependencies=GUARDED)

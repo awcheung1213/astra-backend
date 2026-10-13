@@ -152,7 +152,7 @@ class WordPressAdapter:
         except RequestsError as error:
             raise CmsWriteError(f"wordpress {method} {path} failed: {error}") from error
         if response.status_code >= 400:
-            raise CmsWriteError(f"wordpress {method} {path} -> {response.status_code}: {response.text[:200]}")
+            raise CmsWriteError(f"wordpress {method} {path} -> {response.status_code}: {response.text[:200]}", status_code=response.status_code)
         return response.json()
 
 

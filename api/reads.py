@@ -332,6 +332,12 @@ async def pulse(organization_id: str, limit: int = 50) -> dict:
     }
 
 
+@router.post("/organizations/{organization_id}/pulse/read")
+async def pulse_read(organization_id: str) -> dict:
+    """Opening Pulse reads it, so the nav badge only counts what's new since."""
+    return {"marked": await Notification.mark_all_read(organization_id)}
+
+
 @router.get("/brands/{brand_id}/reports")
 async def reports(brand_id: str) -> dict:
     """The report archive, newest first."""
