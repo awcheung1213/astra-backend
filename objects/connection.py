@@ -72,6 +72,15 @@ class Connection(SQLModel, BaseObject, table=True):
             await Database.session.flush()
 
     @staticmethod
+    async def update_meta(brand_id: str, provider: str, **facts) -> None:
+        """Merge non-secret facts into the row's meta (e.g. synced_at)."""
+        connection = await Connection.get_for_brand_provider(brand_id, provider)
+        if connection is not None:
+            connection.meta = {**(connection.meta or {}), **facts}
+            Database.session.add(connection)
+            await Database.session.flush()
+
+    @staticmethod
     async def update_credentials(brand_id: str, provider: str, credentials_encrypted: str) -> None:
         """Store a rotated secret (Microsoft rotates refresh tokens) in place."""
         connection = await Connection.get_for_brand_provider(brand_id, provider)

@@ -27,6 +27,7 @@ from objects.brand import Brand
 from objects.change_set import ChangeSet
 from objects.competitor import SOURCE_AI_BOOTSTRAP, Competitor
 from objects.competitor_mention import CompetitorMention
+from objects.connection import Connection
 from objects.finding import Finding
 from objects.goal import Goal
 from objects.lead import Lead
@@ -39,7 +40,7 @@ from objects.report import Report
 from objects.task import STATUS_DONE, STATUS_QUEUED, STATUS_RUNNING, Task
 from objects.visibility_run import VisibilityRun
 from schemas.base_schemas import utc_iso
-from utils import answer_stats, clock, owner_calendar, receipt_facts, receipts
+from utils import answer_stats, clock, owner_calendar, receipt_facts, receipts, traffic
 from utils.authz import current_user
 from utils.site_overview import issue_groups, site_pages_summary
 from worker.tasks.briefs import CLIENT_TASK_NAMES
@@ -120,7 +121,34 @@ async def overview(brand_id: str) -> dict:
             "this_month": await MetricPoint.totals_for_period(brand.id, first_of_this_month, clock.today() + timedelta(days=1)),
             "last_month": await MetricPoint.totals_for_period(brand.id, first_of_last_month, first_of_this_month),
         },
+        "traffic": await traffic_overview(brand),
     }
+
+
+TRAFFIC_LOOKBACK_DAYS = 120  # 12 weekly bars + the window before + data lag
+
+
+async def traffic_overview(brand: Brand) -> dict:
+    """Today's visits card (utils/traffic.py): the best connected source's
+    rolling 28 days, its trend, the "since you joined" baseline and the AI
+    assistants' share. A source counts as loaded once a sync stamped it."""
+    connections = await Connection.connected_for_brand(brand.id)
+    connected = {connection.provider for connection in connections}
+    synced = {connection.provider for connection in connections if (connection.meta or {}).get("synced_at")}
+    source, state = traffic.pick_source(connected, synced)
+    joined_on = brand.onboarded_at.date() if brand.onboarded_at else None
+    if source is None or state != traffic.STATE_READY:
+        return traffic.traffic_kpi(source, state, {}, {}, joined_on)
+    today = clock.today()
+    start = today - timedelta(days=TRAFFIC_LOOKBACK_DAYS)
+    if joined_on is not None:
+        start = min(start, joined_on - timedelta(days=traffic.BASELINE_DAYS + 7))
+    series = await MetricPoint.daily_series(brand.id, [traffic.SERIES_KEY[source], traffic.AI_SERIES_KEY], start, today + timedelta(days=1))
+    by_assistant: dict[str, float] = {}
+    bounds = traffic.window_bounds(series[traffic.SERIES_KEY[source]])
+    if source == traffic.SOURCE_GA4 and bounds is not None:
+        by_assistant = await MetricPoint.totals_by_dimension(brand.id, "ga4", traffic.AI_BY_ASSISTANT_METRIC, bounds[0], bounds[1] + timedelta(days=1))
+    return traffic.traffic_kpi(source, state, series, by_assistant, joined_on)
 
 
 @router.get("/brands/{brand_id}/questions")

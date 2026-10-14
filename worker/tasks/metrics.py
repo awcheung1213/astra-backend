@@ -14,6 +14,7 @@ from utils.database import ReplicaDatabase
 from utils.logger import logger
 from utils.site_fetch import fetch_page
 from utils.task_queue import RETRY_WITH_BACKOFF, create_task, task_lifecycle
+from utils.traffic import AI_BY_ASSISTANT_METRIC
 from worker.app import app
 
 
@@ -24,8 +25,9 @@ async def metrics_ingestion(task_id: str, brand_id: str) -> None:
     normalized metric_points store. Upserts on the (source, metric, dimension,
     day) identity, so re-syncing the window self-corrects late-arriving
     GA4/GSC data and retries are safe. No connections = a free no-op."""
-    async with task_lifecycle(task_id):
-        window_start = min(clock.today(), date.today()) - timedelta(days=SYNC_WINDOW_DAYS)  # sent to Google's real API: sim time must never ask for future days
+    async with task_lifecycle(task_id) as task:
+        window_days = sync_window_days(task.payload)
+        window_start = min(clock.today(), date.today()) - timedelta(days=window_days)  # sent to Google's real API: sim time must never ask for future days
         connections = await Connection.connected_for_brand(brand_id)
 
         upserted_count = 0
@@ -37,10 +39,34 @@ async def metrics_ingestion(task_id: str, brand_id: str) -> None:
             for point in await sync(connection, window_start):
                 await MetricPoint.upsert(brand_id=brand_id, **point)
                 upserted_count += 1
-        logger.info(f"[metrics] brand {brand_id}: {upserted_count} points upserted from {len(connections)} connection(s)")
+            # a synced stamp tells Today "no rows" means zero visits, not "still loading"
+            await Connection.update_meta(brand_id, connection.provider, synced_at=clock.now().isoformat())
+        logger.info(f"[metrics] brand {brand_id}: {upserted_count} points upserted from {len(connections)} connection(s) over {window_days} days")
 
 
 SYNC_WINDOW_DAYS = 7  # re-pulled every sweep — GA4/GSC data arrives late and revises
+BACKFILL_DAYS = 90  # on connect: enough for a 28-day window, the one before it, and a pre-Evergreen baseline
+
+
+def sync_window_days(payload: dict | None) -> int:
+    """The weekly sweep re-pulls 7 days; a connect queues a one-off 90-day
+    backfill ({"backfill_days": 90}) so Today has a trend on day one. Clamped
+    so a bad payload can't ask Google for years. Pure."""
+    requested = (payload or {}).get("backfill_days")
+    if not isinstance(requested, int) or requested <= SYNC_WINDOW_DAYS:
+        return SYNC_WINDOW_DAYS
+    return min(requested, BACKFILL_DAYS)
+
+
+async def queue_traffic_backfill(brand_id: str) -> None:
+    """Called by the Google connect flow once a source lands connected:
+    pull the last 90 days now instead of waiting for Monday's sweep. Its own
+    queueing lock: a queued weekly sweep mustn't swallow it, and a second
+    connect before it runs needs no second one (it reads every connection
+    when it runs)."""
+    await create_task(brand_id=brand_id, name="metrics_ingestion", queue="metrics", payload={"backfill_days": BACKFILL_DAYS}, queueing_lock=f"metrics_backfill:{brand_id}")
+
+
 GSC_DATA_LAG_DAYS = 2  # GSC's most recent days are provisional; stop short of them
 
 
@@ -78,14 +104,28 @@ async def _sync_gsc(connection: Connection, window_start: date) -> list[dict]:
 
 
 async def _sync_ga4(connection: Connection, window_start: date) -> list[dict]:
-    """GA4: daily sessions + key events (GA4's name for conversions)."""
+    """GA4: daily sessions + key events (GA4's name for conversions), plus
+    the sessions AI assistants sent: a daily total (ai_sessions) and a
+    per-assistant split under its OWN metric name — same name with a
+    dimension would double-count in totals_for_period (like page_clicks)."""
     google = GoogleAdapter(connection)
     points = []
     window_end = min(clock.today(), date.today())  # sent to Google's real API: sim time must never ask for future days
     for daily in await google.analytics_daily(window_start, window_end):
         points.append({"source": "ga4", "metric": "sessions", "day": daily["day"], "value": daily["sessions"]})
         points.append({"source": "ga4", "metric": "key_events", "day": daily["day"], "value": daily["key_events"]})
-    return points
+    return points + ai_session_points(await google.analytics_ai_daily(window_start, window_end))
+
+
+def ai_session_points(rows: list[dict]) -> list[dict]:
+    """[{day, assistant, sessions}] -> metric points: one ai_sessions total
+    per day + one ai_sessions_by_assistant per (day, assistant). Pure."""
+    totals: dict[date, float] = {}
+    points = []
+    for row in rows:
+        totals[row["day"]] = totals.get(row["day"], 0.0) + row["sessions"]
+        points.append({"source": "ga4", "metric": AI_BY_ASSISTANT_METRIC, "dimension": row["assistant"], "day": row["day"], "value": row["sessions"]})
+    return [{"source": "ga4", "metric": "ai_sessions", "day": day, "value": value} for day, value in sorted(totals.items())] + points
 
 
 async def _sync_calls(connection: Connection, window_start: date) -> list[dict]:

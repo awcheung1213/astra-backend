@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 import settings
 from adapters import google_adapter
+from api import connections
 from api.connections import mint_state
 from objects.connection import Connection
 from tests._auth import release_runner
@@ -24,10 +25,12 @@ from utils.database import Database, ReplicaDatabase
 from utils.token_crypto import decrypt_credentials
 
 TOKENS = {"access_token": "at-test", "refresh_token": "rt-test"}
+revoked: list[str] = []
 
 
-def _stub_google(monkeypatch, gsc_properties=None, ga4_properties=None):
+def _stub_google(monkeypatch, gsc_properties=None, ga4_properties=None, ga4_streams=None, homepage_html=""):
     monkeypatch.setattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "test-client")
+    revoked.clear()
 
     async def exchange(code):
         return dict(TOKENS)
@@ -42,13 +45,21 @@ def _stub_google(monkeypatch, gsc_properties=None, ga4_properties=None):
         return "at-test"
 
     async def revoke(refresh_token):
-        return None
+        revoked.append(refresh_token)
+
+    async def list_streams(access_token, property_id):
+        return list((ga4_streams or {}).get(property_id, []))
+
+    async def homepage(url):
+        return homepage_html
 
     monkeypatch.setattr(google_adapter, "exchange_google_code", exchange)
     monkeypatch.setattr(google_adapter, "list_gsc_properties", list_gsc)
     monkeypatch.setattr(google_adapter, "list_ga4_properties", list_ga4)
     monkeypatch.setattr(google_adapter, "fetch_google_access_token_standalone", access_token_standalone)
     monkeypatch.setattr(google_adapter, "revoke_google_token", revoke)
+    monkeypatch.setattr(google_adapter, "list_ga4_web_streams", list_streams)
+    monkeypatch.setattr(connections, "fetch_page_html", homepage)
 
 
 async def _signup(client, website_url="https://example.com"):
@@ -118,13 +129,14 @@ async def test_gsc_callback_without_a_match_pends_then_pick_resolves(client, mon
     assert decrypt_credentials(rows[0].credentials_encrypted)["site_url"] == "https://other.example/"
 
 
-async def test_ga4_always_pends_then_pick_resolves(client, monkeypatch):
-    _stub_google(monkeypatch, ga4_properties=[{"property_id": "123456", "display_name": "Main site"}])
+async def test_ga4_ambiguous_pends_then_pick_resolves(client, monkeypatch):
+    two = [{"property_id": "123456", "display_name": "Main site"}, {"property_id": "777", "display_name": "Old site"}]
+    _stub_google(monkeypatch, ga4_properties=two)
     brand_id = await _signup(client)
 
     assert _result(await _callback(client, brand_id, "ga4")) == "pick_property"
     properties = (await client.get(f"/api/v1/brands/{brand_id}/connections/ga4/properties")).json()["properties"]
-    assert properties == [{"property_id": "123456", "display_name": "Main site"}]
+    assert properties == two
 
     response = await client.post(f"/api/v1/brands/{brand_id}/connections/ga4/property", json={"property": "123456"})
     assert response.status_code == 200 and response.json()["status"] == "connected"
@@ -158,3 +170,55 @@ async def test_disconnect_revokes_and_forgets(client, monkeypatch):
     assert response.status_code == 200 and response.json()["status"] == "disconnected"
     assert await _connection_rows(brand_id) == []
     assert (await client.get(f"/api/v1/brands/{brand_id}/connections")).json()["providers"] == []
+
+
+async def test_one_google_consent_connects_both_by_homepage_tag(client, monkeypatch):
+    properties = [{"property_id": "111", "display_name": "Reyes"}, {"property_id": "222", "display_name": "Reyes (old)"}]
+    streams = {"111": [{"measurement_id": "G-NEW11111", "default_uri": "https://example.com"}], "222": [{"measurement_id": "G-OLD22222", "default_uri": "https://example.com"}]}
+    _stub_google(monkeypatch, gsc_properties=["sc-domain:example.com"], ga4_properties=properties, ga4_streams=streams, homepage_html="gtag('config', 'G-NEW11111')")
+    brand_id = await _signup(client)
+
+    assert _result(await _callback(client, brand_id, "google")) == "connected"
+    rows = {row.provider: row for row in await _connection_rows(brand_id)}
+    assert set(rows) == {"gsc", "ga4"} and all(row.status == "connected" for row in rows.values())
+    assert decrypt_credentials(rows["ga4"].credentials_encrypted)["property_id"] == "111"
+
+
+async def test_google_consent_with_analytics_unticked_connects_search_console_only(client, monkeypatch):
+    _stub_google(monkeypatch, gsc_properties=["sc-domain:example.com"], ga4_properties=[{"property_id": "1", "display_name": "x"}])
+    monkeypatch.setattr(google_adapter, "exchange_google_code", _tokens_with_scope("https://www.googleapis.com/auth/webmasters.readonly"))
+    brand_id = await _signup(client)
+
+    assert _result(await _callback(client, brand_id, "google")) == "connected"
+    assert [row.provider for row in await _connection_rows(brand_id)] == ["gsc"]
+
+
+async def test_google_consent_on_the_wrong_account_says_so_and_stores_nothing(client, monkeypatch):
+    _stub_google(monkeypatch)
+    brand_id = await _signup(client)
+
+    assert _result(await _callback(client, brand_id, "google")) == "no_properties"
+    assert await _connection_rows(brand_id) == []
+    url = (await client.post(f"/api/v1/brands/{brand_id}/connections/google/authorize", params={"choose_account": "true"})).json()["url"]
+    assert "select_account" in url
+
+
+async def test_disconnecting_one_keeps_the_shared_grant_and_google_removes_both(client, monkeypatch):
+    streams = {"1": [{"measurement_id": "G-ABCD1234", "default_uri": "https://example.com"}]}
+    _stub_google(monkeypatch, gsc_properties=["sc-domain:example.com"], ga4_properties=[{"property_id": "1", "display_name": "x"}], ga4_streams=streams)
+    brand_id = await _signup(client)
+    assert _result(await _callback(client, brand_id, "google")) == "connected"
+
+    assert (await client.delete(f"/api/v1/brands/{brand_id}/connections/gsc")).status_code == 200
+    assert revoked == []  # GA4 still rides the same grant
+    assert [row.provider for row in await _connection_rows(brand_id)] == ["ga4"]
+
+    assert (await client.delete(f"/api/v1/brands/{brand_id}/connections/google")).status_code == 200
+    assert revoked == ["rt-test"] and await _connection_rows(brand_id) == []
+
+
+def _tokens_with_scope(scope: str):
+    async def exchange(code):
+        return {**TOKENS, "scope": scope}
+
+    return exchange

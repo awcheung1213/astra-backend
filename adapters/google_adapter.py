@@ -5,8 +5,8 @@ adapter instance. Encrypted credentials shape on the connection row:
 - gsc:  {"refresh_token": ..., "site_url": "sc-domain:example.com" or "https://example.com/"}
 - ga4:  {"refresh_token": ..., "property_id": "123456789"}
 The OAuth app itself is GOOGLE_OAUTH_CLIENT_ID/SECRET from settings; the
-consent flow that PUTS refresh tokens on connection rows is onboarding-side
-work that does not exist yet — rows are dev-seeded until it does.
+consent flow that puts refresh tokens on connection rows is api/connections.py
+(one "google" consent covers both; the two rows then share one grant).
 
 These are free read APIs: no cost events (cost events are written manually
 at spend sites; a $0 read has none).
@@ -23,6 +23,7 @@ import httpx
 import settings
 from objects.connection import Connection
 from utils.token_crypto import decrypt_credentials
+from utils.traffic import AI_SOURCE_REGEX, assistant_for_source
 
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -31,7 +32,8 @@ GSC_API_BASE = "https://searchconsole.googleapis.com/webmasters/v3"
 GA4_API_BASE = "https://analyticsdata.googleapis.com/v1beta"
 GA4_ADMIN_API_BASE = "https://analyticsadmin.googleapis.com/v1beta"
 READ_TIMEOUT_SECONDS = 30.0
-GSC_ROW_LIMIT = 25000  # per-page daily rows for a week fit comfortably
+GSC_ROW_LIMIT = 25000  # the API's max per request; a 90-day per-page backfill can need more, so _gsc_query pages
+GSC_MAX_PAGES = 8  # 200k rows: far past any small business's pages x days
 
 
 class GoogleReadError(Exception):
@@ -106,6 +108,25 @@ async def list_ga4_properties(access_token: str) -> list[dict]:
     return properties
 
 
+async def list_ga4_web_streams(access_token: str, property_id: str) -> list[dict]:
+    """One property's web streams: [{measurement_id, default_uri}] — what the
+    connect flow matches against the brand's website and the G- tag on its
+    homepage, so the owner never picks a property."""
+    async with httpx.AsyncClient(timeout=READ_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.get(f"{GA4_ADMIN_API_BASE}/properties/{property_id}/dataStreams", params={"pageSize": 50}, headers={"Authorization": f"Bearer {access_token}"})
+        except httpx.HTTPError as error:
+            raise GoogleReadError(f"ga4 stream listing failed: {error}") from error
+    if response.status_code >= 400:
+        raise GoogleReadError(f"ga4 stream listing -> {response.status_code}: {response.text[:200]}")
+    streams = []
+    for stream in response.json().get("dataStreams", []):
+        web = stream.get("webStreamData") or {}
+        if web:
+            streams.append({"measurement_id": web.get("measurementId", ""), "default_uri": web.get("defaultUri", "")})
+    return streams
+
+
 async def revoke_google_token(refresh_token: str) -> None:
     """Best-effort revoke at Google on disconnect — failures are the
     caller's to log, never to surface (the row is deleted regardless)."""
@@ -144,9 +165,15 @@ class GoogleAdapter:
     async def _gsc_query(self, start_day: date, end_day: date, dimensions: list[str]) -> list[dict]:
         if not self.gsc_site_url:
             raise GoogleReadError("connection has no GSC site_url")
-        body = {"startDate": start_day.isoformat(), "endDate": end_day.isoformat(), "dimensions": dimensions, "rowLimit": GSC_ROW_LIMIT}
-        payload = await self._request("POST", f"{GSC_API_BASE}/sites/{quote(self.gsc_site_url, safe='')}/searchAnalytics/query", body)
-        return payload.get("rows", [])
+        rows: list[dict] = []
+        for page in range(GSC_MAX_PAGES):
+            body = {"startDate": start_day.isoformat(), "endDate": end_day.isoformat(), "dimensions": dimensions, "rowLimit": GSC_ROW_LIMIT, "startRow": page * GSC_ROW_LIMIT}
+            payload = await self._request("POST", f"{GSC_API_BASE}/sites/{quote(self.gsc_site_url, safe='')}/searchAnalytics/query", body)
+            batch = payload.get("rows", [])
+            rows += batch
+            if len(batch) < GSC_ROW_LIMIT:
+                break
+        return rows
 
     ##############################
     # GA4
@@ -168,6 +195,29 @@ class GoogleAdapter:
             metric_values = row.get("metricValues", [])
             daily.append({"day": day, "sessions": float(metric_values[0]["value"]), "key_events": float(metric_values[1]["value"])})
         return daily
+
+    async def analytics_ai_daily(self, start_day: date, end_day: date) -> list[dict]:
+        """Daily sessions that came from AI assistants, per assistant:
+        [{day, assistant, sessions}] — sessionSource matched against the
+        known assistant hosts (utils/traffic.py), several hosts folding into
+        one name (chatgpt.com + chat.openai.com -> ChatGPT)."""
+        if not self.ga4_property_id:
+            raise GoogleReadError("connection has no GA4 property_id")
+        body = {
+            "dateRanges": [{"startDate": start_day.isoformat(), "endDate": end_day.isoformat()}],
+            "dimensions": [{"name": "date"}, {"name": "sessionSource"}],
+            "metrics": [{"name": "sessions"}],
+            "dimensionFilter": {"filter": {"fieldName": "sessionSource", "stringFilter": {"matchType": "FULL_REGEXP", "value": AI_SOURCE_REGEX, "caseSensitive": False}}},
+        }
+        payload = await self._request("POST", f"{GA4_API_BASE}/properties/{self.ga4_property_id}:runReport", body)
+        totals: dict[tuple[date, str], float] = {}
+        for row in payload.get("rows", []):
+            assistant = assistant_for_source(row["dimensionValues"][1]["value"])
+            if assistant is None:
+                continue
+            day = datetime.strptime(row["dimensionValues"][0]["value"], "%Y%m%d").date()
+            totals[(day, assistant)] = totals.get((day, assistant), 0.0) + float(row["metricValues"][0]["value"])
+        return [{"day": day, "assistant": assistant, "sessions": sessions} for (day, assistant), sessions in sorted(totals.items())]
 
     ##############################
     # PLUMBING

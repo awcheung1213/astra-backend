@@ -18,6 +18,7 @@ state + callback machinery: gmail is one more provider on the Google OAuth
 app (send-only scope); outlook is a Microsoft identity-platform app. GET
 email_sender reports which route an approved pitch would take."""
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -44,8 +45,10 @@ from schemas.base_schemas import utc_iso
 from schemas.connection_schemas import ConnectionsResponse, PickPropertyRequest, ProviderStatusResponse, SiteConnectRequest, SiteStatusResponse, WordPressAuthorizeRequest
 from utils.logger import logger
 from utils.pitch_mail import ROUTE_GMAIL, ROUTE_OUTLOOK, mail_return_url, owner_email_for, resolve_sender
+from utils.site_fetch import fetch_page_html
 from utils.token_crypto import decrypt_credentials, encrypt_credentials
 from worker.tasks.changes import ADAPTER_BY_PLATFORM
+from worker.tasks.metrics import queue_traffic_backfill
 
 router = APIRouter(prefix="/api/v1")
 # registered WITHOUT the auth guard (main.py): Google's and WordPress's
@@ -147,15 +150,24 @@ def _site_status(site: Site) -> SiteStatusResponse:
 # public, trusting only its HMAC-signed state (brand, provider, nonce,
 # expiry — minted by authorize, signed with TOKEN_ENCRYPTION_KEY).
 
+GSC_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly"
+GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly"
+# "google" = ONE consent for both read sources (the owner taps one button);
+# its grant then backs both rows. gsc/ga4 alone stay for reconnecting one.
+PROVIDER_GOOGLE = "google"
 GOOGLE_PROVIDER_SCOPES = {
-    "gsc": "https://www.googleapis.com/auth/webmasters.readonly",
-    "ga4": "https://www.googleapis.com/auth/analytics.readonly",
+    "gsc": GSC_SCOPE,
+    "ga4": GA4_SCOPE,
+    PROVIDER_GOOGLE: f"{GSC_SCOPE} {GA4_SCOPE}",
     # outreach email: send-only (never a read scope) + openid email, which
     # names the authorized address (gmail.send can't call users.getProfile)
     ROUTE_GMAIL: GMAIL_SCOPES,
 }
 # the providers with a property to pick (gmail has none)
 PROPERTY_PROVIDERS = ("gsc", "ga4")
+SCOPE_BY_PROVIDER = {"gsc": GSC_SCOPE, "ga4": GA4_SCOPE}
+MAX_GA4_PROPERTIES_SCANNED = 50  # agencies can have hundreds; past this, he picks
+MEASUREMENT_ID_PATTERN = re.compile(r"\bG-[A-Z0-9]{4,12}\b")
 # generous: a first-time consent can involve account choosers, permission
 # review, even a mid-flow detour — an expired state costs a full retry
 STATE_TTL_SECONDS = 1800
@@ -193,24 +205,69 @@ def _website_domain(website: str) -> str:
 
 
 def match_gsc_property(properties: list[str], website_url: str) -> str | None:
-    """Auto-select when exactly one GSC property matches the brand's website:
-    `sc-domain:example.com` covers all subdomains/protocols; URL-prefix
-    properties match on host."""
+    """Auto-select the GSC property for the brand's website:
+    `sc-domain:example.com` covers all subdomains/protocols, so ONE matching
+    domain property wins outright; else one matching URL-prefix property
+    (host match), preferring https when http and https both exist. Anything
+    still ambiguous is his pick. Pure."""
     domain = _website_domain(website_url)
     if not domain:
         return None
-    matches = []
+    domain_matches, prefix_matches = [], []
     for property_url in properties:
         if property_url.startswith("sc-domain:"):
             property_domain = property_url.removeprefix("sc-domain:").lower()
             if domain == property_domain or domain.endswith(f".{property_domain}"):
-                matches.append(property_url)
+                domain_matches.append(property_url)
         elif _website_domain(property_url) == domain:
-            matches.append(property_url)
-    return matches[0] if len(matches) == 1 else None
+            prefix_matches.append(property_url)
+    if len(domain_matches) == 1:
+        return domain_matches[0]
+    if domain_matches:
+        return None
+    if len(prefix_matches) == 1:
+        return prefix_matches[0]
+    secure = [property_url for property_url in prefix_matches if property_url.lower().startswith("https://")]
+    return secure[0] if len(secure) == 1 else None
 
 
-def google_authorize_url(provider: str, state: str, login_hint: str | None = None) -> str:
+def measurement_ids_in_html(html: str | None) -> set[str]:
+    """The GA4 tags (G-XXXX) a homepage loads — the property that really
+    receives his traffic. Pure."""
+    return set(MEASUREMENT_ID_PATTERN.findall(html or ""))
+
+
+def match_ga4_property(streams_by_property: dict[str, list[dict]], website_url: str, page_tags: set[str]) -> str | None:
+    """Auto-select the GA4 property: the one whose web stream's tag is on his
+    homepage; else the one whose stream measures his domain; else, when the
+    account holds exactly one property and nothing contradicts it (no
+    stream pointing at another site), that one. Ambiguity = his pick. Pure."""
+    tagged = [property_id for property_id, streams in streams_by_property.items() if any(stream.get("measurement_id") in page_tags for stream in streams)]
+    if len(tagged) == 1:
+        return tagged[0]
+    domain = _website_domain(website_url)
+    on_domain = [property_id for property_id, streams in streams_by_property.items() if domain and any(_website_domain(stream.get("default_uri", "")) == domain for stream in streams)]
+    if tagged:
+        on_domain = [property_id for property_id in on_domain if property_id in tagged]
+    if len(on_domain) == 1:
+        return on_domain[0]
+    if len(streams_by_property) == 1:
+        ((property_id, streams),) = streams_by_property.items()
+        other_sites = [stream for stream in streams if stream.get("default_uri") and _website_domain(stream["default_uri"]) != domain]
+        return None if other_sites else property_id
+    return None
+
+
+def granted_read_providers(tokens: dict, requested: str) -> list[str]:
+    """Which read sources the consent actually granted: Google's granular
+    consent lets him untick one, and the token response's `scope` says what
+    survived (absent = all requested). Pure."""
+    asked = [provider for provider in PROPERTY_PROVIDERS if provider == requested or (requested == PROVIDER_GOOGLE)]
+    granted = set((tokens.get("scope") or GOOGLE_PROVIDER_SCOPES[requested]).split())
+    return [provider for provider in asked if SCOPE_BY_PROVIDER[provider] in granted]
+
+
+def google_authorize_url(provider: str, state: str, login_hint: str | None = None, choose_account: bool = False) -> str:
     """The Google consent URL for one provider. access_type=offline +
     prompt=consent because Google only returns a refresh token on a forced
     consent; gmail adds include_granted_scopes + the owner's address as
@@ -221,7 +278,8 @@ def google_authorize_url(provider: str, state: str, login_hint: str | None = Non
         "response_type": "code",
         "scope": GOOGLE_PROVIDER_SCOPES[provider],
         "access_type": "offline",
-        "prompt": "consent",
+        # choose_account: "that Google account doesn't have your site" -> pick another
+        "prompt": "consent select_account" if choose_account else "consent",
         "state": state,
     }
     if provider == ROUTE_GMAIL:
@@ -232,7 +290,7 @@ def google_authorize_url(provider: str, state: str, login_hint: str | None = Non
 
 
 @router.post("/brands/{brand_id}/connections/{provider}/authorize")
-async def google_authorize(brand_id: str, provider: str) -> dict:
+async def google_authorize(brand_id: str, provider: str, choose_account: bool = False) -> dict:
     """Returns the consent URL; the SPA navigates to it directly. Google for
     gsc/ga4/gmail; Microsoft for outlook (dispatched here because this route
     pattern would otherwise swallow it)."""
@@ -246,7 +304,7 @@ async def google_authorize(brand_id: str, provider: str) -> dict:
     if not settings.GOOGLE_OAUTH_CLIENT_ID:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Google OAuth is not configured")
     login_hint = await owner_email_for(brand) if provider == ROUTE_GMAIL else None
-    return {"url": google_authorize_url(provider, mint_state(brand.id, provider), login_hint)}
+    return {"url": google_authorize_url(provider, mint_state(brand.id, provider), login_hint, choose_account)}
 
 
 @public_router.get("/connections/google/callback")
@@ -298,24 +356,75 @@ async def google_callback(state: str = "", code: str = "", error: str = "") -> R
             logger.info(f"brand {brand_id}: gmail connected for outreach email")
             return back(provider, "connected")
 
-        if provider == "gsc":
-            brand = await Brand.get(brand_id)
-            properties = await google_adapter.list_gsc_properties(tokens["access_token"])
-            matched = match_gsc_property(properties, brand.website_url)
-            if matched:
-                await Connection.upsert(brand_id, "gsc", STATUS_CONNECTED, encrypt_credentials({"refresh_token": refresh_token, "site_url": matched}))
-                logger.info(f"brand {brand_id}: GSC connected to {matched}")
-                return back(provider, "connected")
-            await Connection.upsert(brand_id, "gsc", STATUS_PENDING, encrypt_credentials({"refresh_token": refresh_token}))
-            logger.info(f"brand {brand_id}: GSC consented, {len(properties)} properties, none auto-matched")
-            return back(provider, "pick_property")
-
-        # ga4: no auto-match is possible — always a property pick
-        await Connection.upsert(brand_id, "ga4", STATUS_PENDING, encrypt_credentials({"refresh_token": refresh_token}))
-        return back(provider, "pick_property")
+        granted = granted_read_providers(tokens, provider)
+        if not granted:
+            logger.info(f"brand {brand_id}: google consent without any read permission")
+            return back(provider, "denied")
+        brand = await Brand.get(brand_id)
+        outcomes = {}
+        for read_provider in granted:
+            connect = _connect_gsc if read_provider == "gsc" else _connect_ga4
+            outcomes[read_provider] = await connect(brand, refresh_token, tokens["access_token"])
+        if STATUS_CONNECTED in outcomes.values():
+            await queue_traffic_backfill(brand_id)
+        return back(provider, callback_result(outcomes))
     except Exception as exc:
         logger.error(f"brand {brand_id}: google callback failed: {exc}")
         return back(provider, "error")
+
+
+OUTCOME_NO_PROPERTIES = "no_properties"
+
+
+def callback_result(outcomes: dict[str, str]) -> str:
+    """One word for the bounce-back from each source's outcome (connected |
+    pending | no_properties): every source empty = the wrong Google
+    account; any pending = finish with a pick; else connected (a source the
+    account simply lacks — no GA4 at all — just stays off). Pure."""
+    if all(outcome == OUTCOME_NO_PROPERTIES for outcome in outcomes.values()):
+        return OUTCOME_NO_PROPERTIES
+    if STATUS_PENDING in outcomes.values():
+        return "pick_property"
+    return "connected"
+
+
+async def _connect_gsc(brand: Brand, refresh_token: str, access_token: str) -> str:
+    """Store the GSC row: connected on an auto-match, pending for a pick;
+    nothing when the account has no verified property."""
+    properties = await google_adapter.list_gsc_properties(access_token)
+    if not properties:
+        logger.info(f"brand {brand.id}: GSC consented but the account has no properties")
+        return OUTCOME_NO_PROPERTIES
+    matched = match_gsc_property(properties, brand.website_url)
+    if matched:
+        await Connection.upsert(brand.id, "gsc", STATUS_CONNECTED, encrypt_credentials({"refresh_token": refresh_token, "site_url": matched}))
+        logger.info(f"brand {brand.id}: GSC connected to {matched}")
+        return STATUS_CONNECTED
+    await Connection.upsert(brand.id, "gsc", STATUS_PENDING, encrypt_credentials({"refresh_token": refresh_token}))
+    logger.info(f"brand {brand.id}: GSC consented, {len(properties)} properties, none auto-matched")
+    return STATUS_PENDING
+
+
+async def _connect_ga4(brand: Brand, refresh_token: str, access_token: str) -> str:
+    """Store the GA4 row: connected when match_ga4_property finds his
+    property (homepage tag, stream domain, or the account's only one),
+    pending for a pick otherwise; nothing when the account has none."""
+    properties = await google_adapter.list_ga4_properties(access_token)
+    if not properties:
+        logger.info(f"brand {brand.id}: GA4 consented but the account has no properties")
+        return OUTCOME_NO_PROPERTIES
+    scanned = properties[:MAX_GA4_PROPERTIES_SCANNED]
+    streams = await asyncio.gather(*(google_adapter.list_ga4_web_streams(access_token, ga4_property["property_id"]) for ga4_property in scanned), return_exceptions=True)
+    streams_by_property = {ga4_property["property_id"]: (result if isinstance(result, list) else []) for ga4_property, result in zip(scanned, streams)}
+    page_tags = measurement_ids_in_html(await fetch_page_html(brand.website_url)) if brand.website_url else set()
+    matched = match_ga4_property(streams_by_property, brand.website_url, page_tags) if len(properties) <= MAX_GA4_PROPERTIES_SCANNED else None
+    if matched:
+        await Connection.upsert(brand.id, "ga4", STATUS_CONNECTED, encrypt_credentials({"refresh_token": refresh_token, "property_id": matched}))
+        logger.info(f"brand {brand.id}: GA4 connected to property {matched}")
+        return STATUS_CONNECTED
+    await Connection.upsert(brand.id, "ga4", STATUS_PENDING, encrypt_credentials({"refresh_token": refresh_token}))
+    logger.info(f"brand {brand.id}: GA4 consented, {len(properties)} properties, none auto-matched")
+    return STATUS_PENDING
 
 
 @router.get("/brands/{brand_id}/connections/{provider}/properties")
@@ -349,6 +458,7 @@ async def google_pick_property(brand_id: str, provider: str, request: PickProper
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="that property is not accessible to the connected Google account")
         credentials["property_id"] = request.property
     connection = await Connection.upsert(brand.id, provider, STATUS_CONNECTED, encrypt_credentials(credentials))
+    await queue_traffic_backfill(brand.id)
     return ProviderStatusResponse.create({"provider": provider, "status": connection.status, "connected_at": utc_iso(connection.connected_at)})
 
 
@@ -361,14 +471,24 @@ async def google_disconnect(brand_id: str, provider: str) -> ProviderStatusRespo
     brand = await Brand.get(brand_id)
     if provider not in GOOGLE_PROVIDER_SCOPES and provider != ROUTE_OUTLOOK:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"provider must be one of {sorted([*GOOGLE_PROVIDER_SCOPES, ROUTE_OUTLOOK])}")
-    connection = await Connection.get_for_brand_provider(brand.id, provider)
-    if connection is not None and connection.credentials_encrypted and provider in PROPERTY_PROVIDERS:
+    removing = list(PROPERTY_PROVIDERS) if provider == PROVIDER_GOOGLE else [provider]
+    tokens = {read_provider: _refresh_token(await Connection.get_for_brand_provider(brand.id, read_provider)) for read_provider in PROPERTY_PROVIDERS}
+    kept = {token for read_provider, token in tokens.items() if read_provider not in removing and token}
+    revoking = {token for read_provider, token in tokens.items() if read_provider in removing and token}
+    for token in revoking - kept:
         try:
-            await google_adapter.revoke_google_token(decrypt_credentials(connection.credentials_encrypted)["refresh_token"])
+            await google_adapter.revoke_google_token(token)
         except Exception as exc:
             logger.error(f"brand {brand.id}: google revoke failed (deleting anyway): {exc}")
-    await Connection.delete_for_brand_provider(brand.id, provider)
+    for read_provider in removing:
+        await Connection.delete_for_brand_provider(brand.id, read_provider)
     return ProviderStatusResponse.create({"provider": provider, "status": "disconnected", "connected_at": None})
+
+
+def _refresh_token(connection: Connection | None) -> str | None:
+    if connection is None or not connection.credentials_encrypted:
+        return None
+    return decrypt_credentials(connection.credentials_encrypted).get("refresh_token")
 
 
 async def _google_connection(brand_id: str, provider: str) -> Connection:

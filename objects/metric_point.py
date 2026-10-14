@@ -43,6 +43,19 @@ class MetricPoint(SQLModel, BaseObject, table=True):
         return {f"{source}:{metric}": float(total) for source, metric, total in rows}
 
     @staticmethod
+    async def daily_series(brand_id: str, keys: list[str], start: date, end: date) -> dict[str, dict[date, float]]:
+        """{'source:metric': {day: value}} for dimensionless rows of each key,
+        days in [start, end) — the traffic card's shape (utils/traffic.py)."""
+        series: dict[str, dict[date, float]] = {key: {} for key in keys}
+        pairs = [tuple(key.split(":", 1)) for key in keys]
+        rows = await ReplicaDatabase.session.execute(
+            select(MetricPoint.source, MetricPoint.metric, MetricPoint.day, MetricPoint.value).where(MetricPoint.brand_id == brand_id).where(MetricPoint.dimension == "").where(func.concat(MetricPoint.source, ":", MetricPoint.metric).in_([f"{source}:{metric}" for source, metric in pairs])).where(MetricPoint.day >= start).where(MetricPoint.day < end)  # type: ignore
+        )
+        for source, metric, day, value in rows:
+            series[f"{source}:{metric}"][day] = float(value)
+        return series
+
+    @staticmethod
     async def totals_by_dimension(brand_id: str, source: str, metric: str, start: date, end: date) -> dict[str, float]:
         """One metric's period totals split by dimension (e.g. gsc clicks per
         page) — the decay detector's shape. Dimensionless rows are skipped."""
