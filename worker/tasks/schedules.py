@@ -174,12 +174,14 @@ async def schedule_client_chases(timestamp: int) -> None:
     logger.info(f"[schedules] schedule_client_chases tick ts={clock.now()}: {count} chases")
 
 
-@app.periodic(cron="0 13 * * *")  # daily 13:00 UTC — same-day deadlines
+@app.periodic(cron="0 12 * * 2")  # Tuesdays 12:00 UTC — weekly until a real request feed exists
 @app.task(name="schedule_journalist_scans", queue="schedules")
 async def schedule_journalist_scans(timestamp: int) -> None:
     """#20 — journalist/source request scan; scout flags + drafts, human sends.
     Shallow until the Connectively/Qwoted adapters land — see outreach.py's
-    TODO(#20)."""
+    TODO(#20). Weekly, not daily (2026-10-13): a web-search-only scan cost
+    ~$0.45/day/brand for little yield; go back to daily once a feed with real
+    same-day requests is wired in."""
     count = await _create_task_per_active_brand(name="outreach_scout", queue="outreach", payload={"scan": "journalist_requests"})
     logger.info(f"[schedules] schedule_journalist_scans tick ts={clock.now()}: {count} scans")
 

@@ -138,7 +138,7 @@ class ClaudeAgent:
         """
         messages: list[dict] = [{"role": "user", "content": prompt}]
         for iteration in range(1, max_iterations + 1):
-            response = await self.agent_turn(messages, system=system, tools=tools)
+            response = await self.agent_turn(messages, system=system, tools=tools, model=self.model, max_tokens=self.max_tokens)
             if operation is not None:
                 usage = response.usage
                 server_tool_use = getattr(usage, "server_tool_use", None)

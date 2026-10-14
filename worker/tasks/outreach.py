@@ -33,6 +33,11 @@ from utils.token_crypto import decrypt_credentials, encrypt_credentials
 from worker.app import app
 from worker.tasks.site_audit import normalize_page_url
 
+# The scout reads search results and drafts a short email: Sonnet does that well
+# at ~40% of Opus's per-token price, and the scout is input-heavy (100k+ tokens
+# of search results a run) — it was the single biggest line in cost_events.
+SCOUT_MODEL = "claude-sonnet-5-5"
+
 
 @app.task(name="outreach_scout", queue="outreach", retry=RETRY_WITH_BACKOFF)
 async def outreach_scout(task_id: str, brand_id: str) -> None:
@@ -48,7 +53,7 @@ async def outreach_scout(task_id: str, brand_id: str) -> None:
             raise ValueError(f"unknown outreach scan: {scan!r}")
         brand = await Brand.get(brand_id)
 
-        agent_output = await ClaudeAgent().run_role(
+        agent_output = await ClaudeAgent(model=SCOUT_MODEL).run_role(
             ROLE_OUTREACH_SCOUT,
             prompt=_scout_prompt(brand, scan_brief),
             tools=[WEB_SEARCH_TOOL],
