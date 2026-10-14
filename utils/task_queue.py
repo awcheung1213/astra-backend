@@ -36,7 +36,7 @@ RETRY_WITH_BACKOFF = RetryStrategy(max_attempts=2, wait=20, exponential_wait=10)
 # periodic, idempotent-by-nature work: at most one QUEUED job per brand, so a
 # launch landing next to the weekly tick (or a double cron fire) doesn't stack a
 # second crawl/brief/run (BUG-008). A running job doesn't block the next one.
-PER_BRAND_QUEUEING_LOCK_TASKS = {"site_audit", "visibility_run", "weekly_brief", "metrics_ingestion", "alert_detection", "plan_update", "content_calendar", "monthly_report"}
+PER_BRAND_QUEUEING_LOCK_TASKS = {"backfill_question_topics", "site_audit", "visibility_run", "weekly_brief", "metrics_ingestion", "alert_detection", "plan_update", "content_calendar", "monthly_report"}
 
 # work too costly to stack even behind a RUNNING job: create_task skips while
 # one is queued OR running for the brand (DEC-027 — a quarter tick landing

@@ -25,7 +25,18 @@ async def sign_off_prompts(brand_id: str, prompt_ids: list[str]) -> int:
     activated_count = await Prompt.activate(brand_id, prompt_ids)
     if activated_count:
         await create_task(brand_id=brand_id, name="submit_prompt_execution_batch", queue="collection")
+        # every tracked question gets a short topic (the AI answers tiles):
+        # research writes one at birth, but adopted / older / hand-added
+        # questions arrive without — label them whenever they're tracked
+        if questions_without_topic(await Prompt.by_brand(brand_id), prompt_ids):
+            await create_task(brand_id=brand_id, name="backfill_question_topics", queue="research")
     return activated_count
+
+
+def questions_without_topic(prompts: list, prompt_ids: list[str]) -> bool:
+    """Any of the just-tracked questions still has no topic. Pure."""
+    chosen = set(prompt_ids)
+    return any(prompt.id in chosen and not getattr(prompt, "topic", None) for prompt in prompts)
 
 
 def default_tracked_prompt_ids(prompts: list) -> list[str]:

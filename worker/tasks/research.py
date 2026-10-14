@@ -98,11 +98,13 @@ async def research_competitors(task_id: str, brand_id: str) -> None:
 
 @app.task(name="backfill_question_topics", queue="research", retry=RETRY_WITH_BACKOFF)
 async def backfill_question_topics(task_id: str, brand_id: str) -> None:
-    """One-off: label the brand's questions that predate topics (topic NULL)
-    with a cheap model — one no-tool call per TOPIC_BACKFILL_BATCH questions,
-    metered as cost_events. Fills only NULLs (Prompt.set_topic), so re-running
-    is safe and costs nothing once every question is labeled. Enqueue per
-    brand via create_task(brand_id=..., name="backfill_question_topics", queue="research")."""
+    """Label the brand's questions that have no topic yet (topic NULL) with a
+    cheap model — one no-tool call per TOPIC_BACKFILL_BATCH questions, metered
+    as cost_events. Queued automatically whenever questions are tracked and
+    any lack a topic (utils/prompt_signoff.sign_off_prompts; one waiting job
+    per brand via the queueing lock), and usable as a one-off backfill. Fills
+    only NULLs (Prompt.set_topic), so re-running is safe and costs nothing
+    once every question is labeled."""
     async with task_lifecycle(task_id):
         brand = await Brand.get(brand_id)
         unlabeled = [prompt for prompt in await Prompt.by_brand(brand.id) if prompt.topic is None]

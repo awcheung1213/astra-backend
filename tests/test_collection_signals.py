@@ -94,7 +94,12 @@ async def test_signoff_enqueues_collection_via_create_task(monkeypatch):
         raise AssertionError("sign-off must not defer_async() (rule 8)")
 
     monkeypatch.setattr(prompts_api.Brand, "get", fake_brand_get)
+
+    async def labeled_prompts(brand_id):
+        return []  # nothing unlabeled -> only the collection job
+
     monkeypatch.setattr(prompt_signoff.Prompt, "activate", fake_activate)
+    monkeypatch.setattr(prompt_signoff.Prompt, "by_brand", labeled_prompts)
     monkeypatch.setattr(prompt_signoff, "create_task", fake_create_task)  # the shared sign-off path
     monkeypatch.setattr(collection.submit_prompt_execution_batch, "defer_async", forbidden_defer)
 

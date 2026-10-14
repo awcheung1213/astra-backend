@@ -68,7 +68,11 @@ def signoff_calls(monkeypatch):
         calls["enqueued"].append(kwargs)
         return SimpleNamespace(id="t1")
 
+    async def labeled_prompts(brand_id):
+        return calls.get("brand_prompts", [])  # default: nothing unlabeled -> no topic job
+
     monkeypatch.setattr(prompt_signoff.Prompt, "activate", fake_activate)
+    monkeypatch.setattr(prompt_signoff.Prompt, "by_brand", labeled_prompts)
     monkeypatch.setattr(prompt_signoff, "create_task", fake_create_task)
     return calls
 
@@ -153,3 +157,21 @@ async def test_research_before_launch_tracks_nothing(post_launch_research, signo
     post_launch_research["onboarded_at"] = None
     await research.research_prompts.func("t1", "b1")
     assert signoff_calls["activated"] == [] and signoff_calls["enqueued"] == []
+
+
+async def test_tracking_a_question_without_a_topic_queues_labeling(signoff_calls):
+    signoff_calls["brand_prompts"] = [SimpleNamespace(id="p1", topic=None), SimpleNamespace(id="p2", topic="Emergency plumber")]
+    assert await prompt_signoff.sign_off_prompts("b1", ["p1", "p2"]) == 2
+    assert [call["name"] for call in signoff_calls["enqueued"]] == ["submit_prompt_execution_batch", "backfill_question_topics"]
+
+
+async def test_tracking_labeled_questions_queues_no_labeling(signoff_calls):
+    signoff_calls["brand_prompts"] = [SimpleNamespace(id="p1", topic="Emergency plumber")]
+    await prompt_signoff.sign_off_prompts("b1", ["p1"])
+    assert [call["name"] for call in signoff_calls["enqueued"]] == ["submit_prompt_execution_batch"]
+
+
+def test_topic_labeling_is_one_waiting_job_per_brand():
+    from utils.task_queue import PER_BRAND_QUEUEING_LOCK_TASKS
+
+    assert "backfill_question_topics" in PER_BRAND_QUEUEING_LOCK_TASKS
