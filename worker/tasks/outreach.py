@@ -157,7 +157,7 @@ def _scout_prompt(brand: Brand, scan_brief: str) -> str:
         "bio, the callout itself) — put that page's URL in contact_source. NEVER guess or build an address from\n"
         "a pattern (firstname@domain); if you did not see one, omit to_email, to_name and contact_source.\n"
         "Respond with ONLY a JSON array, no prose and no code fences. Each entry:\n"
-        '{"where": "url or venue", "why_fit": "why this brand is credible here", "subject": "short subject line",\n'
+        '{"where": "url or venue", "why_fit": "one plain sentence under 15 words, written to the business owner, on why this site is worth emailing (no jargon, no strategy talk)", "subject": "short subject line",\n'
         ' "pitch": "the email body", "to_email": "address seen on their site, else omit", "to_name": "the person or\n'
         ' publication it goes to, else omit", "contact_source": "url where the address was seen, else omit",\n'
         ' "talking_points": ["..."], "deadline": "when stated, else omit"}\n\n'

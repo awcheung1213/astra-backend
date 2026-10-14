@@ -328,7 +328,7 @@ async def _crawl(base_url: str) -> list[dict]:
             visited_urls.add(page_url)
 
             fetch_started_at = time.monotonic()
-            page_response = await _fetch(client, page_url)
+            page_response = await _fetch(client, page_url, fresh=True)
             elapsed_seconds = time.monotonic() - fetch_started_at
 
             if page_response is None or page_response.status_code >= 400:
@@ -348,14 +348,14 @@ async def _crawl(base_url: str) -> list[dict]:
 async def _find_sitemap(client: AsyncSession, candidate_urls: list[str]) -> str | None:
     """First candidate that actually serves sitemap XML, else None."""
     for candidate_url in candidate_urls:
-        response = await _fetch(client, candidate_url)
+        response = await _fetch(client, candidate_url, fresh=True)
         if response is not None and response.status_code < 400 and is_sitemap_document(response.headers.get("content-type", ""), response.text):
             return candidate_url
     return None
 
 
 async def _fetch_text(client: AsyncSession, url: str) -> str | None:
-    response = await _fetch(client, url)
+    response = await _fetch(client, url, fresh=True)
     if response is None or response.status_code >= 400:
         return None
     return response.text

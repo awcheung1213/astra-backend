@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, status
 from objects.approval_setting import ApprovalSetting
 from objects.brand import Brand
 from schemas.brand_schemas import ApprovalPresetRequest, ApprovalPresetResponse, BrandResponse, BrandUpdateRequest
+from utils.task_queue import create_task
 
 router = APIRouter(prefix="/api/v1")
 
@@ -65,3 +66,13 @@ async def set_approval_preset(brand_id: str, request: ApprovalPresetRequest) -> 
     auto_tasks = await ApprovalSetting.apply_preset(brand.id, request.approval_preset)
     await Brand.update(brand.id, approval_preset=request.approval_preset)
     return ApprovalPresetResponse.create({"brand_id": brand.id, "approval_preset": request.approval_preset, "auto_approved_tasks": auto_tasks})
+
+
+@router.post("/brands/{brand_id}/site_audit")
+async def recheck_site(brand_id: str) -> dict:
+    """ "Check again" — the owner did his part (installed the SEO plugin, fixed
+    something himself) and shouldn't wait for Sunday's audit. The per-brand
+    queueing lock means repeat taps never stack checks."""
+    await Brand.get(brand_id)
+    task = await create_task(brand_id=brand_id, name="site_audit", queue="audit")
+    return {"queued": task is not None}

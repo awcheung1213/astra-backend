@@ -422,7 +422,7 @@ async def test_crawl_audits_the_homepage_once(monkeypatch):
     fetched: list[str] = []
     home_html = '<html><head><title>Home</title></head><body><h1>Hi</h1><a href="/">Home</a><a href="https://site.example/#main">Top</a><a href="/about">About</a></body></html>'
 
-    async def fake_fetch(client, url):
+    async def fake_fetch(client, url, fresh=False):
         fetched.append(url)
         if url.endswith("robots.txt") or "sitemap" in url:
             return None

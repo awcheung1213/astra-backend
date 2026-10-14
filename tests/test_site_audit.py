@@ -12,9 +12,9 @@ from worker.tasks.site_audit import (
     is_sitemap_document,
     page_facts,
     page_findings,
-    seo_plugin,
     robots_blocked_agents,
     robots_sitemap_urls,
+    seo_plugin,
     sitemap_candidate_urls,
 )
 
@@ -116,3 +116,10 @@ def test_plugin_install_unblocks_a_plugin_skip():
     assert not site_audit.plugin_unblocks_skip(skipped, {"facts": {"seo_plugin": None}})
     assert not site_audit.plugin_unblocks_skip({"skipped": {"reason": "Controlled by the theme."}}, {"facts": {"seo_plugin": "yoast"}})
     assert not site_audit.plugin_unblocks_skip({}, {"facts": {"seo_plugin": "yoast"}})
+
+
+def test_fresh_url_busts_page_caches():
+    from utils.site_fetch import fresh_url
+
+    assert fresh_url("https://reyes.example/about/", 7) == "https://reyes.example/about/?evergreen_fresh=7"
+    assert fresh_url("https://reyes.example/?p=2&evergreen_fresh=1", 9) == "https://reyes.example/?p=2&evergreen_fresh=9"

@@ -279,7 +279,9 @@ async def approvals(brand_id: str) -> dict:
             {"id": artifact.id, "type": artifact.type, "created_at": utc_iso(artifact.created_at), "content": artifact.content, "evidence": artifact.evidence, **({"workstreams": receipts.plan_workstreams(artifact.content)} if artifact.type == "plan" else {})}
             for artifact in await Artifact.pending_for_brand(brand_id)
         ],
-        "waiting_on_you": [{"id": task.id, "name": task.name, "days_waiting": (clock.now() - task.created_at).days if task.created_at else 0} for task in client_tasks],
+        # workstream: a plan can ask for case-study data per workstream — two
+        # identical "Share the data" cards read as a bug without their names
+        "waiting_on_you": [{"id": task.id, "name": task.name, "workstream": (task.payload or {}).get("workstream"), "days_waiting": (clock.now() - task.created_at).days if task.created_at else 0} for task in client_tasks],
     }
 
 
