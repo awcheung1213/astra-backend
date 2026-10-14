@@ -183,3 +183,13 @@ def test_shows_description_needs_the_google_tag_not_the_social_one():
     social_only = '<meta property="og:description" content="Why Evergreen exists" />'
     assert not changes.shows_description(social_only, "Why Evergreen exists")
     assert changes.shows_description('<meta name="description" content="Why  Evergreen exists">', "Why Evergreen exists")
+
+
+def test_named_instead_counts_answers_across_cities():
+    from utils.answer_stats import named_instead
+
+    results = [SimpleNamespace(id="r1"), SimpleNamespace(id="r2"), SimpleNamespace(id="r3")]
+    mention = lambda name: SimpleNamespace(competitor_name=name)  # noqa: E731
+    mentions = {"r1": [mention("SEO.co"), mention("Ahrefs")], "r2": [mention("SEO.co")], "r3": [mention("Zeta"), mention("Ahrefs"), mention("Beta")]}
+    assert named_instead(results, mentions) == [{"name": "Ahrefs", "answers": 2}, {"name": "SEO.co", "answers": 2}, {"name": "Beta", "answers": 1}]
+    assert named_instead(results, {}) == []

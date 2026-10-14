@@ -365,6 +365,9 @@ async def google_callback(state: str = "", code: str = "", error: str = "") -> R
         for read_provider in granted:
             connect = _connect_gsc if read_provider == "gsc" else _connect_ga4
             outcomes[read_provider] = await connect(brand, refresh_token, tokens["access_token"])
+        if outcomes.get("ga4") == OUTCOME_NO_PROPERTIES and outcomes.get("gsc") == STATUS_CONNECTED:
+            # remember Google told us: Today can say "no Analytics on this account" instead of nagging to connect it
+            await Connection.update_meta(brand_id, "gsc", ga4_on_account=False)
         if STATUS_CONNECTED in outcomes.values():
             await queue_traffic_backfill(brand_id)
         return back(provider, callback_result(outcomes))

@@ -185,7 +185,7 @@ def test_count_fixes_live_excludes_undos_and_old_and_unapplied():
         _change_set("cs4", "applied", NOW - timedelta(days=8)),
         _change_set("cs5", "pending", None),
     ]
-    assert owner_calendar.count_fixes_live(change_sets, since) == 2
+    assert owner_calendar.count_fixes_live(change_sets, since) == 1  # cs2 went live but was undone: Today doesn't count it either
 
 
 def test_count_emails_sent_by_sent_at_in_window():
@@ -248,11 +248,13 @@ async def test_recap_endpoints(monkeypatch):
     monkeypatch.setattr(recap_api, "questions_named_delta", _returns(None))  # covered by test_recap_questions_named_delta
     moves = [{"prompt_id": "p1", "topic": "Emergency plumber", "from": "watching", "to": "core", "reason": "Competitors get named here and you don't yet"}]
     monkeypatch.setattr(recap_api, "question_moves", _returns(moves))  # recap_moves: tests/test_question_tiers.py
+    monkeypatch.setattr(recap_api, "traffic_overview", _returns({"state": "not_connected"}))
+    monkeypatch.setattr(recap_api, "ai_named", _returns(None))
     monkeypatch.setattr(recap_api.Artifact, "for_brand", _returns([_pitch("sent", NOW - timedelta(days=3))]))
     monkeypatch.setattr(recap_api.User, "mark_recap_seen", mark)
 
     payload = await recap_api.recap("b1", request)
-    assert payload == {"week_of": "2026-10-12", "fixes_live": 1, "emails_sent": 1, "work_days": 2, "questions_named_delta": None, "should_show": True, "question_moves": moves}
+    assert payload == {"week_of": "2026-10-12", "fixes_live": 1, "emails_sent": 1, "work_days": 2, "questions_named_delta": None, "should_show": True, "question_moves": moves, "visits": None, "ai_named": None}
     assert await recap_api.recap_seen("b1", request) == {"week_of": "2026-10-12", "seen": True}
     assert marked == [("u1", date(2026, 10, 12))]
     user.recap_seen_week = date(2026, 10, 12)

@@ -267,12 +267,18 @@ def _pick_proposal(proposals: list, change_sets_by_artifact: dict[str, list]) ->
 def issue_status(finding, proposal, proposal_change_sets: list, live_id: str | None) -> tuple[str, str, str | None]:
     """(status, status_label, status_reason) for one finding. Pure."""
     detail = finding.detail or {}
+    verifications = [(getattr(change_set, "verification", None) or {}).get("status") for change_set in proposal_change_sets]
+    if "waiting_on_you" in verifications:
+        # the fix is parked behind the one-tap helper-plugin OK (worker/tasks/changes.py park_for_seo_bridge)
+        return "fix_waiting", STATUS_LABELS["fix_waiting"], "To set this, we need one OK from you: a free helper plugin. It's waiting in Needs you."
     if finding.status == STATUS_FIXED:
         if live_id:
             return "fix_live", STATUS_LABELS["fix_live"], None
         return "fixed", STATUS_LABELS["fixed"], "This problem no longer shows up on your site."
     if detail.get(FIX_DID_NOT_TAKE_KEY) and live_id:
-        return "open", "Still showing after our fix", "We made a change here, but the problem still shows up, so it needs a closer look."
+        if "not_showing" in verifications:
+            return "open", "Still showing after our fix", "We changed it, but your page isn't showing it yet. We're trying another way this week."
+        return "open", "Still showing after our fix", "We made a change here, but your site still shows the problem. We're trying another way this week."
     if live_id:
         return "fix_live", STATUS_LABELS["fix_live"], None  # rows from before close-on-apply existed
     skipped = detail.get("skipped")

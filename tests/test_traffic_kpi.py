@@ -184,3 +184,9 @@ def test_callback_result_words():
     assert callback_result({"gsc": "connected", "ga4": "no_properties"}) == "connected"  # no GA4 at all: clicks from Google
     assert callback_result({"gsc": "connected", "ga4": "pending"}) == "pick_property"
     assert callback_result({"gsc": "no_properties", "ga4": "no_properties"}) == "no_properties"  # the wrong Google account
+
+
+def test_analytics_state_only_says_none_when_google_said_so():
+    assert traffic.analytics_state({"ga4", "gsc"}, []) == traffic.ANALYTICS_CONNECTED
+    assert traffic.analytics_state({"gsc"}, [{"ga4_on_account": False}]) == traffic.ANALYTICS_NONE_ON_ACCOUNT
+    assert traffic.analytics_state({"gsc"}, [{}]) == traffic.ANALYTICS_NOT_CONNECTED

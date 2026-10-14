@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Request
 
+from api.reads import traffic_overview
 from objects.artifact import STATUS_APPROVED, Artifact
 from objects.brand import Brand
 from objects.change_set import ChangeSet
@@ -75,7 +76,19 @@ async def recap(brand_id: str, request: Request) -> dict:
         questions_named_delta=await questions_named_delta(brand_id),
     )
     payload["question_moves"] = await question_moves(brand_id, clock.now() - timedelta(days=owner_calendar.RECAP_WINDOW_DAYS))
+    # the two numbers he judges us by: visits (rolling 28 days) and AI answers that name him
+    traffic = await traffic_overview(await Brand.get(brand_id))
+    payload["visits"] = {key: traffic.get(key) for key in ("state", "source", "total", "change", "change_pct", "ai_visits")} if traffic.get("state") == "ready" else None
+    payload["ai_named"] = await ai_named(brand_id)
     return payload
+
+
+async def ai_named(brand_id: str) -> dict | None:
+    """{named, tracked} for the core questions this week; None before the first score."""
+    _, summary = await answer_stats.question_answer_stats(brand_id, await Prompt.by_brand(brand_id), with_gap_competitor=False)
+    if not summary.get("week_of") or not summary.get("questions_tracked"):
+        return None
+    return {"named": summary.get("questions_named"), "tracked": summary.get("questions_tracked")}
 
 
 @router.post("/brands/{brand_id}/recap/seen")

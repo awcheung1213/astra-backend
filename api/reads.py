@@ -138,8 +138,9 @@ async def traffic_overview(brand: Brand) -> dict:
     synced = {connection.provider for connection in connections if (connection.meta or {}).get("synced_at")}
     source, state = traffic.pick_source(connected, synced)
     joined_on = brand.onboarded_at.date() if brand.onboarded_at else None
+    analytics = traffic.analytics_state(connected, [connection.meta or {} for connection in connections if connection.provider == "gsc"])
     if source is None or state != traffic.STATE_READY:
-        return traffic.traffic_kpi(source, state, {}, {}, joined_on)
+        return {**traffic.traffic_kpi(source, state, {}, {}, joined_on), "analytics": analytics}
     today = clock.today()
     start = today - timedelta(days=TRAFFIC_LOOKBACK_DAYS)
     if joined_on is not None:
@@ -149,7 +150,7 @@ async def traffic_overview(brand: Brand) -> dict:
     bounds = traffic.window_bounds(series[traffic.SERIES_KEY[source]])
     if source == traffic.SOURCE_GA4 and bounds is not None:
         by_assistant = await MetricPoint.totals_by_dimension(brand.id, "ga4", traffic.AI_BY_ASSISTANT_METRIC, bounds[0], bounds[1] + timedelta(days=1))
-    return traffic.traffic_kpi(source, state, series, by_assistant, joined_on)
+    return {**traffic.traffic_kpi(source, state, series, by_assistant, joined_on), "analytics": analytics}
 
 
 @router.get("/brands/{brand_id}/questions")

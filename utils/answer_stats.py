@@ -352,6 +352,21 @@ def competitor_names_by_engine(results: Iterable[Any], mentions_by_result_id: di
     return names
 
 
+NAMED_INSTEAD_LIMIT = 3
+
+
+def named_instead(results: list[Any], mentions_by_result_id: dict[str, list[Any]]) -> list[dict]:
+    """[{name, answers}] — the businesses an engine named for this question
+    across its answers this week, by how many answers named each (ties
+    alphabetical), top NAMED_INSTEAD_LIMIT. Pure."""
+    counts: dict[str, int] = {}
+    for result in results:
+        for name in {mention.competitor_name for mention in mentions_by_result_id.get(result.id, [])}:
+            counts[name] = counts.get(name, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))
+    return [{"name": name, "answers": count} for name, count in ranked[:NAMED_INSTEAD_LIMIT]]
+
+
 def top_competitor(names: Iterable[str]) -> str | None:
     """The most-named competitor; ties go alphabetical so the answer is stable."""
     counts = Counter(names)
@@ -583,6 +598,8 @@ def engine_answer_row(engine: str, results: list[Any], market_order: list[str], 
         "change": engine_change(previous, stats),
         "businesses_named": None,
         "also_named": [],
+        # who this assistant names INSTEAD, across every city this week (most first) — Marco's first question
+        "named_instead": named_instead(results, mentions_by_result_id),
         "sample": None,
     }
     if sample is None:

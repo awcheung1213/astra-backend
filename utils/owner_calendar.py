@@ -149,8 +149,10 @@ def recap_ready_at(week_of: date, recap_cron: str | None) -> datetime:
 
 
 def count_fixes_live(change_sets: list, since: datetime) -> int:
-    """Forward change sets that went live since `since` (undos excluded)."""
-    return sum(1 for change_set in forward_applied_change_sets(change_sets) if change_set.applied_at >= since)
+    """Forward change sets that went live since `since` and are STILL live —
+    the same rule as Today's "fixes live this week" (receipts.change_outcomes:
+    an undone fix reads "Undid: …", never as a fix). Undos excluded."""
+    return sum(1 for change_set in forward_applied_change_sets(change_sets) if change_set.applied_at >= since and change_set.status == STATUS_APPLIED and not change_set.reverted_by_change_set_id)
 
 
 def count_emails_sent(pitches: list, since: datetime) -> int:

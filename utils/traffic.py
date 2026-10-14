@@ -137,3 +137,18 @@ def window_bounds(series: dict[date, float]) -> tuple[date, date] | None:
         return None
     end = max(series)
     return end - timedelta(days=WINDOW_DAYS - 1), end
+
+
+ANALYTICS_CONNECTED = "connected"
+ANALYTICS_NONE_ON_ACCOUNT = "none_on_account"  # Google said his account has no Analytics property
+ANALYTICS_NOT_CONNECTED = "not_connected"
+
+
+def analytics_state(connected: set[str], gsc_metas: list[dict]) -> str:
+    """Whether to offer "Connect Google Analytics" (never connected) or say
+    plainly that his Google account has none. Pure."""
+    if SOURCE_GA4 in connected:
+        return ANALYTICS_CONNECTED
+    if any(meta.get("ga4_on_account") is False for meta in gsc_metas):
+        return ANALYTICS_NONE_ON_ACCOUNT
+    return ANALYTICS_NOT_CONNECTED

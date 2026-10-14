@@ -135,7 +135,9 @@ def _plan_prompt(brand: Brand, facts: dict) -> str:
         "Use ONLY the facts provided; where data is missing, plan from brand context and say so.\n"
         "Every string is read by the business owner on their Roadmap page: write in a calm, plain voice —\n"
         "no capitalised shouting (write 'Stop', never 'STOP'), no internal labels such as 'WS1' or 'WS4'\n"
-        "(name the workstream instead), and each first_moves / stop_doing entry is one short, self-contained item.\n\n"
+        "(name the workstream instead), and each first_moves / stop_doing entry is one short, self-contained item.\n"
+        "Write every name, first_moves item and expected_impact in words a plumber understands: never 'schema', 'meta description',\n"
+        "'structured data', 'funnel', 'impressions', 'organic', 'intent', 'SERP', 'Search Console' or 'workstream' — say what it does for him.\n\n"
         "Respond with ONLY a JSON object, no prose and no code fences:\n"
         '{"summary_markdown": "the plan narrative, for the owner",\n'
         ' "workstreams": [{"name": "...", "why": "tied to a fact", "expected_impact": "...", "effort": "low|medium|high", "first_moves": ["..."],\n'

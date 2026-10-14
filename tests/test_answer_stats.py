@@ -246,7 +246,7 @@ def test_engine_answer_row_uses_corpus_answer_and_sample_mentions():
 
 def test_engine_answer_row_not_asked():
     row = answer_stats.engine_answer_row("claude", [], [], {}, {}, {})
-    assert row == {"engine": "claude", "named": None, "share": None, "cities_asked": 0, "cities_named": 0, "rank": None, "change": None, "businesses_named": None, "also_named": [], "sample": None}
+    assert row == {"engine": "claude", "named": None, "share": None, "cities_asked": 0, "cities_named": 0, "rank": None, "change": None, "businesses_named": None, "also_named": [], "named_instead": [], "sample": None}
 
 
 def test_businesses_named_floors_at_listed_rank_and_counts_brand_only_when_named():
