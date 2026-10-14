@@ -225,8 +225,8 @@ async def test_audit_reopens_a_closed_by_fix_issue_instead_of_a_twin(monkeypatch
     async def _async(value):
         return value
 
-    async def crawl(base_url):
-        return [{"kind": "missing_schema", "severity": "warn", "summary": "s", "detail": {"url": "https://reyes.example/"}}]
+    async def crawl(base_url, known_pages=(), problem_urls=()):
+        return site_audit.CrawlResult(findings=[{"kind": "missing_schema", "severity": "warn", "summary": "s", "detail": {"url": "https://reyes.example/"}}], checks=[("https://reyes.example/", "Main pages", "needs_fix")])
 
     async def reopen_after_fix(id):
         reopened.append(id)
@@ -245,6 +245,9 @@ async def test_audit_reopens_a_closed_by_fix_issue_instead_of_a_twin(monkeypatch
     monkeypatch.setattr(site_audit, "_crawl", crawl)
     monkeypatch.setattr(site_audit.Finding, "open_for_brand", lambda brand_id: _async([]))
     monkeypatch.setattr(site_audit.Finding, "fixed_by_change_for_brand", lambda brand_id: _async([fixed]))
+    monkeypatch.setattr(site_audit.SitePage, "for_brand", lambda brand_id: _async([]))
+    monkeypatch.setattr(site_audit.SitePage, "upsert_seen", none)
+    monkeypatch.setattr(site_audit.SitePage, "record_checks", none)
     monkeypatch.setattr(site_audit.Finding, "reopen_after_fix", reopen_after_fix)
     monkeypatch.setattr(site_audit.Finding, "create", create)
     monkeypatch.setattr(site_audit, "create_task", create_task)
@@ -412,9 +415,16 @@ async def test_worklog_and_change_detail_carry_the_contract_keys(monkeypatch):
     monkeypatch.setattr(reads.Artifact, "for_brand", returns([proposal]))
     monkeypatch.setattr(reads.Artifact, "created_since", returns([proposal]))
     monkeypatch.setattr(reads.Report, "for_brand", returns([]))
+    monkeypatch.setattr(reads.owner_calendar.Site, "by_brand", returns(SimpleNamespace(id="s1")))
+    from objects.site_page import SitePage
+
+    monkeypatch.setattr(SitePage, "status_counts", returns([("Main pages", "needs_fix", 1, now)]))
 
     worklog = await reads.worklog("b1")
-    assert {"site_health", "running", "queued", "shipped", "change_sets", "issues", "done_for_you"} <= worklog.keys()
+    assert worklog["site_pages"]["total"] == 1 and worklog["issue_groups"][0]["status"] == "fixed"  # utils/site_overview.py (tests/test_site_pages.py)
+    assert {"site_health", "running", "queued", "shipped", "change_sets", "issues", "done_for_you", "activity_days", "upcoming"} <= worklog.keys()
+    assert len(worklog["activity_days"]) == 7 and worklog["activity_days"][-2]["count"] == 1  # the fix went live yesterday
+    assert len(worklog["upcoming"]) == 4 and {"date", "weekday", "what"} <= worklog["upcoming"][0].keys()
     (issue,) = worklog["issues"]
     assert (issue["status"], issue["dot"], issue["change_set_id"], issue["artifact_id"]) == ("fix_live", "green", "cs1", "a1")
     assert [item["kind"] for item in worklog["done_for_you"]] == ["fix_live", "audit"]  # the proposal itself is not an outcome
@@ -426,6 +436,7 @@ async def test_worklog_and_change_detail_carry_the_contract_keys(monkeypatch):
     detail = await reads.change_set_detail("cs1")
     assert detail["headline"] == entry["headline"] and detail["changes"][0]["what"] == "Added a business card for search engines"
     assert "<script" not in json.dumps(detail["changes"])
+    assert detail["proposed_at"] == reads.utc_iso(proposal.created_at) and "page_facts" not in detail  # a field write, not a published page
 
 
 class _Capture:

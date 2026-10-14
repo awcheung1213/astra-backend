@@ -16,11 +16,12 @@ Pure fingerprint blocks are what this beats. A JavaScript challenge (Cloudflare
 until a client site actually needs it."""
 
 import time
+import zlib
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from curl_cffi.requests import AsyncSession, RequestsError, Response
 
-__all__ = ["AsyncSession", "RequestsError", "Response", "fetch", "fetch_page", "fetch_page_html", "site_session"]
+__all__ = ["AsyncSession", "RequestsError", "Response", "body_text", "fetch", "fetch_page", "fetch_page_html", "site_session"]
 
 IMPERSONATE_BROWSER = "safari"
 DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -70,4 +71,28 @@ async def fetch_page_html(url: str) -> str | None:
     response = await fetch_page(url)
     if response is None or response.status_code >= 400:
         return None
+    return response.text
+
+
+GZIP_MAGIC = b"\x1f\x8b"
+MAX_DECOMPRESSED_BYTES = 20_000_000  # a full 50k-URL sitemap is ~10MB; refuse a zip bomb
+
+
+def decode_body(content: bytes, max_bytes: int = MAX_DECOMPRESSED_BYTES) -> str:
+    """Raw bytes as text, gunzipped first when the body is a gzip FILE (a
+    sitemap.xml.gz is served as application/gzip — transfer-encoding gzip is
+    already undone by curl). Output capped at max_bytes. Pure."""
+    if content[:2] == GZIP_MAGIC:
+        try:
+            content = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(content, max_bytes)
+        except zlib.error:
+            return ""
+    return content[:max_bytes].decode("utf-8", errors="replace")
+
+
+def body_text(response: Response) -> str:
+    """A fetched body as text, gzip files included (see decode_body)."""
+    content = getattr(response, "content", None) or b""
+    if content[:2] == GZIP_MAGIC:
+        return decode_body(content)
     return response.text

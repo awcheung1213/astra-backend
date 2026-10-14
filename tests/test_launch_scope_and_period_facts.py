@@ -434,7 +434,7 @@ async def test_crawl_audits_the_homepage_once(monkeypatch):
 
     monkeypatch.setattr(site_audit, "_fetch", fake_fetch)
     monkeypatch.setattr(site_audit, "site_session", fake_session)
-    findings = await site_audit._crawl("https://site.example")
+    findings = (await site_audit._crawl("https://site.example")).findings
     pages = [url for url in fetched if not url.endswith("robots.txt") and "sitemap" not in url]
     assert pages == ["https://site.example/", "https://site.example/about"]
     schema_urls = [finding["detail"]["url"] for finding in findings if finding["kind"] == "missing_schema"]

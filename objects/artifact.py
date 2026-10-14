@@ -113,6 +113,15 @@ class Artifact(SQLModel, BaseObject, table=True):
         return list(rows.scalars().all())
 
     @staticmethod
+    async def decided_for_brand(brand_id: str, statuses: list[str], exclude_types: set[str], limit: int = 10) -> list["Artifact"]:
+        """The brand's most recently decided artifacts (verdict time, else
+        birth for rows born decided), newest first — the Your-tasks "recent" list."""
+        decided_at = func.coalesce(Artifact.reviewed_at, Artifact.created_at)
+        statement = select(Artifact).where(Artifact.brand_id == brand_id).where(Artifact.status.in_(statuses)).where(Artifact.type.not_in(exclude_types)).order_by(decided_at.desc()).limit(limit)  # type: ignore
+        rows = await ReplicaDatabase.session.execute(statement)
+        return list(rows.scalars().all())
+
+    @staticmethod
     async def by_ids(ids) -> list["Artifact"]:
         ids = [artifact_id for artifact_id in set(ids) if artifact_id]
         if not ids:

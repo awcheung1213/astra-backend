@@ -206,8 +206,8 @@ async def test_audit_closes_twins_as_duplicate_and_counts_only_real_fixes(monkey
     newer = SimpleNamespace(id="f-new", kind="missing_schema", detail={"url": "https://site.example/"}, created_at=datetime(2026, 9, 2))
     resolved: list = []
 
-    async def crawl(base_url):
-        return [{"kind": "missing_schema", "severity": "warn", "summary": "s", "detail": {"url": "https://site.example/"}}]
+    async def crawl(base_url, known_pages=(), problem_urls=()):
+        return site_audit.CrawlResult(findings=[{"kind": "missing_schema", "severity": "warn", "summary": "s", "detail": {"url": "https://site.example/"}}], checks=[("https://site.example/", "Main pages", "needs_fix")])
 
     async def resolve(id, status=STATUS_FIXED):
         resolved.append((id, status))
@@ -220,6 +220,9 @@ async def test_audit_closes_twins_as_duplicate_and_counts_only_real_fixes(monkey
     monkeypatch.setattr(site_audit, "_crawl", crawl)
     monkeypatch.setattr(site_audit.Finding, "open_for_brand", lambda brand_id: _async([newer, older]))
     monkeypatch.setattr(site_audit.Finding, "fixed_by_change_for_brand", lambda brand_id: _async([]))
+    monkeypatch.setattr(site_audit.SitePage, "for_brand", lambda brand_id: _async([]))
+    monkeypatch.setattr(site_audit.SitePage, "upsert_seen", none)
+    monkeypatch.setattr(site_audit.SitePage, "record_checks", none)
     monkeypatch.setattr(site_audit.Finding, "resolve", resolve)
     monkeypatch.setattr(site_audit, "queue_first_plan_when_ready", none)
     result = await site_audit.run_site_audit("b1")

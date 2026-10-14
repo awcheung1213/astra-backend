@@ -29,6 +29,7 @@ from objects.query_response import QueryResponse  # noqa
 from objects.report import Report  # noqa
 from objects.review import Review  # noqa
 from objects.site import Site  # noqa
+from objects.site_page import SitePage  # noqa
 from objects.snapshot import Snapshot  # noqa
 from objects.task import Task  # noqa
 from objects.user import User  # noqa

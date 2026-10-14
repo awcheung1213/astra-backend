@@ -6,9 +6,9 @@ treat the IdP subject (supabase_user_id) as an attribute. No password_hash
 anywhere: credentials live exclusively in Supabase Auth."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, func, select
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, String, func, select
 from sqlmodel import Field, SQLModel
 
 from objects.base_object import BaseObject
@@ -28,6 +28,7 @@ class User(SQLModel, BaseObject, table=True):
     role: str = ROLE_ADMIN
     phone: str | None = Field(default=None, sa_column=Column(String, nullable=True))
     sms_urgent_enabled: bool = Field(default=False, sa_column=Column(Boolean, server_default="false", nullable=False))
+    recap_seen_week: date | None = Field(default=None, sa_column=Column(Date, nullable=True))  # Monday of the ISO week whose weekly recap this user dismissed
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
     @staticmethod
@@ -62,6 +63,15 @@ class User(SQLModel, BaseObject, table=True):
             user.email = email
             session.add(user)
             await session.flush()
+        return user
+
+    @staticmethod
+    async def mark_recap_seen(id: str, week_of: date) -> "User":
+        """Dismiss the weekly recap for the ISO week starting `week_of` (its Monday)."""
+        user = await Database.session.get(User, id)
+        user.recap_seen_week = week_of
+        Database.session.add(user)
+        await Database.session.flush()
         return user
 
     @staticmethod

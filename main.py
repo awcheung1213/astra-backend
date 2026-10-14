@@ -43,6 +43,7 @@ app.add_middleware(
 # routers register here as resources land (api/organizations.py, api/brands.py, ...)
 from fastapi import Depends  # noqa: E402
 
+from api.answers import router as answers_router  # noqa: E402
 from api.approvals import router as approvals_router  # noqa: E402
 from api.ask import router as ask_router  # noqa: E402
 from api.brands import router as brands_router  # noqa: E402
@@ -53,10 +54,13 @@ from api.me import router as me_router  # noqa: E402
 from api.onboarding import router as onboarding_router  # noqa: E402
 from api.prompts import router as prompts_router  # noqa: E402
 from api.reads import router as reads_router  # noqa: E402
+from api.recap import router as recap_router  # noqa: E402
+from api.site_pages import router as site_pages_router  # noqa: E402
 from api.webhooks import router as webhooks_router  # noqa: E402
 from utils.authz import guard  # noqa: E402
 
 GUARDED = [Depends(guard)]
+app.include_router(answers_router, dependencies=GUARDED)
 app.include_router(approvals_router, dependencies=GUARDED)
 app.include_router(ask_router, dependencies=GUARDED)
 app.include_router(brands_router, dependencies=GUARDED)
@@ -67,6 +71,8 @@ app.include_router(me_router, dependencies=GUARDED)
 app.include_router(onboarding_router, dependencies=GUARDED)
 app.include_router(prompts_router, dependencies=GUARDED)
 app.include_router(reads_router, dependencies=GUARDED)
+app.include_router(recap_router, dependencies=GUARDED)
+app.include_router(site_pages_router, dependencies=GUARDED)
 app.include_router(webhooks_router)
 
 # last added = outermost. InternalServerError must wrap DatabaseSession so an

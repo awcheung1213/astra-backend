@@ -38,8 +38,9 @@ from objects.report import Report
 from objects.task import STATUS_DONE, STATUS_QUEUED, STATUS_RUNNING, Task
 from objects.visibility_run import VisibilityRun
 from schemas.base_schemas import utc_iso
-from utils import clock, receipts
+from utils import answer_stats, clock, owner_calendar, receipt_facts, receipts
 from utils.authz import current_user
+from utils.site_overview import issue_groups, site_pages_summary
 from worker.tasks.briefs import CLIENT_TASK_NAMES
 from worker.tasks.site_audit import AUDIT_KINDS
 
@@ -124,29 +125,37 @@ async def overview(brand_id: str) -> dict:
 @router.get("/brands/{brand_id}/questions")
 async def questions(brand_id: str) -> dict:
     """The tracked-questions page: every non-retired prompt with its
-    last-week stats (asked count, mention rate, average rank when ranked)."""
+    last-week stats (asked count, mention rate, average rank when ranked),
+    plus the AI answers screen's per-assistant "names you" read (engines,
+    named_count vs last week — utils/answer_stats.py), strongest first, and
+    a summary (rings, "8 of 15 name you", biggest gap)."""
     await Brand.get(brand_id)
     results_by_prompt: dict[str, list[PromptResult]] = {}
     for result in await PromptResult.filter(brand_id):
         results_by_prompt.setdefault(result.prompt_id, []).append(result)
 
+    prompts = await Prompt.by_brand(brand_id)
+    answer_rows, summary = await answer_stats.question_answer_stats(brand_id, prompts)
     question_rows = []
-    for prompt in await Prompt.by_brand(brand_id):
+    for prompt in prompts:
         results = results_by_prompt.get(prompt.id, [])
         ranks = [result.rank for result in results if result.rank is not None]
         question_rows.append(
             {
                 "id": prompt.id,
                 "text": prompt.text,
+                "topic": prompt.topic,
                 "category": prompt.category,
                 "is_active": prompt.is_active,
                 "source": prompt.source,
                 "asked": len(results),
                 "mention_rate": round(sum(result.brand_mentioned for result in results) / len(results), 2) if results else None,
                 "average_rank": round(sum(ranks) / len(ranks), 1) if ranks else None,
+                **answer_rows[prompt.id],
             }
         )
-    return {"questions": question_rows}
+    question_rows.sort(key=answer_stats.strength_sort_key)
+    return {"questions": question_rows, "summary": summary}
 
 
 @router.get("/brands/{brand_id}/worklog")
@@ -176,11 +185,15 @@ async def worklog(brand_id: str) -> dict:
             "resolved_recently": [{"kind": finding.kind, "summary": finding.summary, "resolved_at": utc_iso(finding.resolved_at)} for finding in resolved_findings],
         },
         "issues": _issues(open_findings + resolved_findings, proposals, all_change_sets),
+        "site_pages": await site_pages_summary(brand_id),  # the "Your site" screen: true page count + rotation progress + sections
+        "issue_groups": issue_groups(open_findings + resolved_findings, proposals, all_change_sets),  # "fix by problem" (+ pending fix ids for the batch approve)
         "done_for_you": await _done_for_you(brand_id, all_change_sets, artifacts_by_id, done_window_start),
         "running": [{"id": task.id, "name": task.name, "started": utc_iso(task.created_at)} for task in machine_tasks if task.status == STATUS_RUNNING],
         "queued": [{"id": task.id, "name": task.name} for task in machine_tasks if task.status == STATUS_QUEUED],
         "shipped": [{"id": task.id, "name": task.name, "finished_at": utc_iso(task.finished_at)} for task in done_tasks],
         "change_sets": [_change_set_entry(change_set, artifacts_by_id.get(change_set.artifact_id), all_change_sets) for change_set in all_change_sets[:CHANGE_LEDGER_LIMIT]],
+        "activity_days": owner_calendar.activity_days(done_tasks, all_change_sets, clock.today()),
+        "upcoming": await owner_calendar.upcoming_for_brand(brand_id),
     }
 
 
@@ -258,6 +271,7 @@ async def change_set_detail(change_set_id: str) -> dict:
         "reverted_by": change_set.reverted_by_change_set_id,
         **receipts.ledger_entry(change_set, artifact, original),
         "changes": receipts.change_details(change_set, original),
+        **receipt_facts.receipt_additions(change_set, artifact),
     }
 
 
@@ -282,6 +296,7 @@ async def approvals(brand_id: str) -> dict:
         # workstream: a plan can ask for case-study data per workstream — two
         # identical "Share the data" cards read as a bug without their names
         "waiting_on_you": [{"id": task.id, "name": task.name, "workstream": (task.payload or {}).get("workstream"), "days_waiting": (clock.now() - task.created_at).days if task.created_at else 0} for task in client_tasks],
+        "recent": await receipt_facts.recent_decisions(brand_id),  # the last 10 decided (receipt_facts.recent_entry)
     }
 
 

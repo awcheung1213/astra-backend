@@ -71,7 +71,7 @@ async def ask(brand_id: str, request: AskRequest) -> AskResponse:
     return AskResponse.create({"answer": answer_with_follow_up(response["answer"], diagnosis_queued), "answer_summary": answer_summary(response["answer"]), "diagnosis_queued": diagnosis_queued})
 
 
-DIAGNOSIS_PROMISE = "I've started a full diagnosis to dig deeper — it will land in your Pulse."
+DIAGNOSIS_PROMISE = "I've started a full diagnosis to dig deeper — it will show up under Updates (the bell)."
 
 
 def answer_with_follow_up(answer: str, diagnosis_queued: bool) -> str:

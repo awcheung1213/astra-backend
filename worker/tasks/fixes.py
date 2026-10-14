@@ -221,7 +221,7 @@ DISPLAY_SCHEMA: dict = {
         },
     },
 }
-UNDO_LINE = "You can undo this from Work → Site changes at any time."
+UNDO_LINE = "You can undo this anytime from Your site → Every change."
 
 
 def display_errors(display, operation_count: int) -> list[str]:

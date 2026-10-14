@@ -208,11 +208,13 @@ def _load_migration():
     return module
 
 
-def test_migration_is_the_single_head_and_swaps_the_constraint():
+def test_migration_chain_has_no_branch_and_swaps_the_constraint():
     migration = _load_migration()
     assert migration.revision == "310ab26709e8" and migration.down_revision == "9f83fec900f7"
     down_revisions = [ast.literal_eval(line.split("=", 1)[1].strip()) for path in (REPO / "alembic" / "versions").glob("*.py") for line in path.read_text().splitlines() if line.startswith("down_revision")]
-    assert "310ab26709e8" not in down_revisions and down_revisions.count("9f83fec900f7") == 1
+    # later migrations build on it — but never two from the same parent (a branch = two heads)
+    assert down_revisions.count("310ab26709e8") <= 1 and down_revisions.count("9f83fec900f7") == 1
+    assert len(down_revisions) == len(set(down_revisions))
 
     ops: list[tuple] = []
     migration.op = SimpleNamespace(

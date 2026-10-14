@@ -85,6 +85,15 @@ class ChangeSet(SQLModel, BaseObject, table=True):
         return list(rows.scalars().all())
 
     @staticmethod
+    async def for_artifacts(artifact_ids) -> list["ChangeSet"]:
+        """Every set born from any of these artifacts (applies AND undos) — read-only views."""
+        artifact_ids = [artifact_id for artifact_id in set(artifact_ids) if artifact_id]
+        if not artifact_ids:
+            return []
+        rows = await ReplicaDatabase.session.execute(select(ChangeSet).where(ChangeSet.artifact_id.in_(artifact_ids)))  # type: ignore
+        return list(rows.scalars().all())
+
+    @staticmethod
     async def reverted_from(id: str) -> "ChangeSet | None":
         """The set this one undoes (whose reverted_by_change_set_id points here), or None."""
         rows = await ReplicaDatabase.session.execute(select(ChangeSet).where(ChangeSet.reverted_by_change_set_id == id).limit(1))  # type: ignore
