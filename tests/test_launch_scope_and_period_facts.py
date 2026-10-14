@@ -16,6 +16,8 @@ from fastapi import HTTPException
 from sqlalchemy.dialects import postgresql
 
 import api.onboarding as onboarding
+import utils.collection_plan as collection_plan
+import utils.question_tiers as collection_plan_types
 import worker.tasks.changes as changes
 import worker.tasks.collection as collection
 import worker.tasks.reports as reports
@@ -177,6 +179,16 @@ def submit_harness(monkeypatch, session):
     monkeypatch.setattr(collection.QueryResponse, "within_freshness_window", nothing_fresh)
     monkeypatch.setattr(collection, "initialize_adapter", lambda adapter: FakeEngine())
     monkeypatch.setattr(collection.Batch, "create", batch_create)
+
+    async def every_active_question_is_core(brand_id, now, record=True):
+        return collection_plan_types.CollectionPlan(core_ids=[prompt.id for prompt in await prompts_by_brand(brand_id)])
+
+    async def no_spend(now):
+        return collection_plan.BudgetContext(rates=collection_plan.AnswerRates(), spend_by_brand={})
+
+    monkeypatch.setattr(collection, "questions_to_collect", every_active_question_is_core)
+    monkeypatch.setattr(collection.Prompt, "mark_checked", _no_stamp)
+    monkeypatch.setattr(collection, "load_budget_context", no_spend)
     return state
 
 
@@ -518,3 +530,7 @@ async def test_apply_of_a_revert_set_posts_the_undo_wording(monkeypatch, session
     await changes.change_set_apply.func("t1", "b1")
     assert synced == ["a1"]  # the finding lifecycle rides the same apply
     assert notifications[0]["title"] == "Undid the change to your homepage" and notifications[0]["link_ref"] == "change_sets/cs-revert"
+
+
+async def _no_stamp(brand_id, ids, at):
+    return None

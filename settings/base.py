@@ -21,6 +21,17 @@ ACTIVE_ENGINES = [engine.strip() for engine in os.environ.get("ACTIVE_ENGINES", 
 # the big cost lever: web searches dominate the collection bill; 0 disables search
 MAX_WEB_SEARCHES = int(os.environ.get("MAX_WEB_SEARCHES", "1"))
 ENGINE_MAX_CONCURRENCY = int(os.environ.get("ENGINE_MAX_CONCURRENCY", "32"))
+# Lean collection (owner decision 2026-10-14; utils/city_panel.py + utils/collection_plan.py):
+# national brands collect in ONE shared panel of NATIONAL_PANEL_SIZE system cities
+# (+ the nationwide pseudo-market); long-tail questions use the top SMALL_PANEL_SIZE
+# panel cities (+ nationwide) with web search off; local brands keep their home cities
+NATIONAL_PANEL_SIZE = int(os.environ.get("NATIONAL_PANEL_SIZE", "20"))
+SMALL_PANEL_SIZE = int(os.environ.get("SMALL_PANEL_SIZE", "5"))
+# hard monthly collection cap per brand (USD, month-to-date, attributed spend)
+COLLECTION_BUDGET_NATIONAL_USD = float(os.environ.get("COLLECTION_BUDGET_NATIONAL_USD", "30"))
+COLLECTION_BUDGET_LOCAL_USD = float(os.environ.get("COLLECTION_BUDGET_LOCAL_USD", "8"))
+# Saturday borderline re-ask: extra non-panel cities for a 40-60% share question x engine
+REASK_EXTRA_CITIES = int(os.environ.get("REASK_EXTRA_CITIES", "10"))
 
 # provider API keys, read straight from env (empty = engine unusable at call
 # time; adapters construct clients lazily so an engine that's off needs no key)

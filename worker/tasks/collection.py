@@ -6,22 +6,26 @@ from adapters.registry import initialize_adapter
 from adapters.services.claude_service import ClaudeService
 from constants.constants import UsageKind
 from objects.batch import Batch
-from objects.brand import Brand
+from objects.brand import FOOTPRINT_LOCAL, Brand
 from objects.citation import Citation
 from objects.competitor import SOURCE_DISCOVERED, Competitor
 from objects.competitor_mention import CompetitorMention
 from objects.cost_event import CostEvent
-from objects.market import Market
+from objects.market import SOURCE_NATIONAL, Market
 from objects.prompt import Prompt
 from objects.prompt_result import SENTIMENT_NEUTRAL, SENTIMENT_POSITIVE, PromptResult
 from objects.query_response import QueryResponse
 from schemas.prompt_result_schemas import PromptResultWithCompetitorMentions
 from schemas.provider_schemas import LocationContext, QueryRequest, QueryResult
+from utils import answer_stats, clock
+from utils.city_panel import reask_cities, small_panel
+from utils.collection_plan import CORPUS_RAW_KEY, WEB_SEARCH_KEY, AnswerRates, BudgetContext, CandidateCell, PlannedCell, borderline_pairs, is_no_search_answer, load_budget_context, plan_cells, reask_planned_cells, trim_to_budget
 from utils.competitor_matching import build_competitor_regex_patterns, parse_prompt_result_for_competitor_mention_rank
 from utils.database import Database, ReplicaDatabase
 from utils.llm_usage import estimate_cost, summarize_usage
 from utils.logger import logger
 from utils.query_normalization import query_hash
+from utils.question_tiers import questions_to_collect
 from utils.response_parsing import mentions_name, parse_prompt_result_for_mention_rank
 from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from utils.urls import domain_from_url
@@ -34,12 +38,18 @@ from worker.tasks.visibility import hydrate_prompt_result
 async def submit_prompt_execution_batch(task_id: str | None = None, brand_id: str | None = None) -> None:
     """Collection is system-wide. A prompt sign-off enqueues it via create_task
     (task_id = the signing brand's tasks row); the weekly cron defers it bare —
-    the documented rule-8 exception (brand-less system work, no tasks row)."""
+    the documented rule-8 exception (brand-less system work, no tasks row).
+    The Saturday borderline re-ask enqueues it per brand via create_task with
+    payload {"reask": true} (no exception needed: it has a tasks row)."""
     logger.info(f"[collection] submit_prompt_execution_batch - start", priority="medium")
 
     if task_id is not None:
-        async with task_lifecycle(task_id):
-            await run_submit_prompt_execution_batch(task_id=task_id, brand_id=brand_id)
+        async with task_lifecycle(task_id) as task:
+            # the Saturday re-ask cron enqueues this task per national brand with payload {"reask": true}
+            if (getattr(task, "payload", None) or {}).get("reask") and brand_id is not None:
+                await run_submit_reask_batch(task_id=task_id, brand_id=brand_id)
+            else:
+                await run_submit_prompt_execution_batch(task_id=task_id, brand_id=brand_id)
     else:
         async with ReplicaDatabase().connection():
             async with Database().connection():
@@ -150,98 +160,191 @@ COMPETITOR_DISCOVERY_SCHEMA = {
 async def run_submit_prompt_execution_batch(task_id: str | None = None, brand_id: str | None = None) -> None:
     """Launched brands only (AC-L19) — an abandoned signup never buys collection.
     A sign-off (task_id + brand_id) always includes the signing brand: an
-    explicit human request, even if it lands before launch."""
+    explicit human request, even if it lands before launch.
+
+    Lean collection (utils/collection_plan.py): per brand, the question levels
+    (utils.question_tiers.questions_to_collect) pick the cells — core x the
+    full market set with web search, long-tail x the small panel without —
+    then the monthly budget governor trims them before they join the
+    cross-brand, corpus-deduped queue. A sign-off's first fill rides the same
+    plan, so it never fans out beyond the panel."""
     in_process = await _in_process_cells()
     brands = await Brand.launched()
     if brand_id is not None and all(brand.id != brand_id for brand in brands):
         brands.append(await Brand.get(brand_id))
+    budget = await load_budget_context(clock.now())
     queue_for_llm: dict[str, dict[tuple[str, str], dict]] = {engine_name: {} for engine_name in settings.ACTIVE_ENGINES}
 
+    now = clock.now()
     for brand in brands:
-        active_prompts = [prompt for prompt in await Prompt.by_brand(brand_id=brand.id) if prompt.is_active]
+        # preview only: the rotation stamps (last_checked_at) are written below
+        # for what was actually sent, so a long-tail pick the budget drops keeps
+        # its turn instead of silently losing it
+        plan = await questions_to_collect(brand.id, now, record=False)
+        prompts_by_id = {prompt.id: prompt for prompt in await Prompt.by_brand(brand_id=brand.id)}
         markets = await Market.by_brand(brand_id=brand.id, brand_footprint=brand.footprint)
-        cells = set((prompt.id, market.id) for prompt in active_prompts for market in markets)
-        query_hash_and_text_by_prompt_id = {prompt.id: dict(hash=query_hash(prompt.text), text=prompt.text) for prompt in active_prompts}
+        small_markets = small_panel(markets, brand.footprint, settings.SMALL_PANEL_SIZE)
+        planned = plan_cells(
+            core_ids=[prompt_id for prompt_id in plan.core_ids if prompt_id in prompts_by_id],
+            longtail_ids=[prompt_id for prompt_id in plan.longtail_ids if prompt_id in prompts_by_id],
+            core_market_ids=[market.id for market in markets],
+            small_market_ids=[market.id for market in small_markets],
+        )
+        candidates = await _stale_candidates(brand.id, {engine_name: planned for engine_name in settings.ACTIVE_ENGINES}, prompts_by_id, in_process, queue_for_llm, budget.rates)
+        dropped_ids = _enqueue_within_budget(brand, candidates, prompts_by_id, queue_for_llm, budget)
+        await Prompt.mark_checked(brand.id, checked_ids(plan.core_ids, plan.longtail_ids, dropped_ids), now)
 
-        for engine_name in settings.ACTIVE_ENGINES:
-            engine_queue = queue_for_llm[engine_name]
+    await _submit_engine_queues(queue_for_llm, task_id)
 
-            prompt_results_within_freshness_window = await PromptResult.within_freshness_window(brand_id=brand.id, engine=engine_name)
-            prompt_result_cells_within_freshness_window = set((prompt_result.prompt_id, prompt_result.market_id) for prompt_result in prompt_results_within_freshness_window)
 
-            stale_cells_by_id = cells - prompt_result_cells_within_freshness_window
-            stale_cells_by_hashes = set((query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id) for prompt_id, market_id in stale_cells_by_id)
+def checked_ids(core_ids: list[str], longtail_ids: list[str], dropped_ids: set[str]) -> list[str]:
+    """The questions this run counts as checked: every core question, and the
+    long-tail picks the budget didn't fully drop. Pure."""
+    return list(core_ids) + [prompt_id for prompt_id in longtail_ids if prompt_id not in dropped_ids]
 
-            query_responses_within_freshness_window = await QueryResponse.within_freshness_window(stale_cells=stale_cells_by_hashes, engine=engine_name)
 
-            query_response_by_cell = {(query_response.query_hash, query_response.market_id): query_response for query_response in query_responses_within_freshness_window}
-            for prompt_id, market_id in stale_cells_by_id:
-                query_response = query_response_by_cell.get((query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id))
-                if query_response is not None:
-                    continue
-                if (query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id) in in_process.get(engine_name, set()):
-                    continue
-                if (query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id) not in engine_queue:
-                    engine_queue[(query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id)] = dict(
-                        prompt_id=prompt_id,
-                        market_id=market_id,
-                        query_text=query_hash_and_text_by_prompt_id[prompt_id]["text"],
-                        subscribers=[
-                            dict(
-                                brand_id=brand.id,
-                                prompt_id=prompt_id,
-                            )
-                        ],
-                    )
-                else:
-                    engine_queue[(query_hash_and_text_by_prompt_id[prompt_id]["hash"], market_id)]["subscribers"].append(
-                        dict(
-                            brand_id=brand.id,
-                            prompt_id=prompt_id,
-                        )
-                    )
+async def run_submit_reask_batch(task_id: str, brand_id: str) -> None:
+    """Saturday borderline re-ask (one national brand, before Sunday's
+    scoring): core questions whose share this week is 40-60% on an engine get
+    asked on that engine in the next REASK_EXTRA_CITIES non-panel system
+    cities. Local brands skip. Same freshness + budget rules as the weekly run."""
+    brand = await Brand.get(brand_id)
+    if brand.footprint == FOOTPRINT_LOCAL:
+        logger.info(f"[collection] reask - brand {brand_id} is local; skipped")
+        return
+    # core = the is_active mirror of tier == core, read directly: calling
+    # questions_to_collect here could advance the long-tail rotation (it picks
+    # THIS run's slice) for a run that collects no long tail
+    prompts = [prompt for prompt in await Prompt.by_brand(brand_id=brand.id) if prompt.retired_at is None]
+    prompts_by_id = {prompt.id: prompt for prompt in prompts}
+    core_ids = [prompt.id for prompt in prompts if prompt.is_active]
+    pairs = borderline_pairs(await answer_stats.week_results(brand.id), core_ids, list(settings.ACTIVE_ENGINES))
+    extra_markets = reask_cities(await Market.reask_pool(), settings.REASK_EXTRA_CITIES)
+    if not pairs or not extra_markets:
+        logger.info(f"[collection] reask - brand {brand_id}: {len(pairs)} borderline question x engine, {len(extra_markets)} extra cities; nothing to ask")
+        return
+    queue_for_llm: dict[str, dict[tuple[str, str], dict]] = {engine_name: {} for engine_name in settings.ACTIVE_ENGINES}
+    budget = await load_budget_context(clock.now())
+    planned_by_engine = reask_planned_cells(pairs, [market.id for market in extra_markets])
+    candidates = await _stale_candidates(brand.id, planned_by_engine, prompts_by_id, await _in_process_cells(), queue_for_llm, budget.rates)
+    _enqueue_within_budget(brand, candidates, prompts_by_id, queue_for_llm, budget)
+    logger.info(f"[collection] reask - brand {brand_id}: {len(pairs)} borderline question x engine x {len(extra_markets)} extra cities")
+    await _submit_engine_queues(queue_for_llm, task_id)
 
+
+async def _stale_candidates(brand_id: str, planned_by_engine: dict[str, list[PlannedCell]], prompts_by_id: dict, in_process: dict[str, set[tuple[str, str]]], queue_for_llm: dict[str, dict[tuple[str, str], dict]], rates: AnswerRates) -> list[CandidateCell]:
+    """The planned cells that still need a paid answer, priced. Skipped: a
+    fresh result for the brand, a fresh corpus answer (a no-search one doesn't
+    count for a web-search cell), an in-flight request. A cell another brand
+    already queued this run costs this brand nothing (it subscribes)."""
+    candidates: list[CandidateCell] = []
+    hash_by_prompt_id = {prompt_id: query_hash(prompt.text) for prompt_id, prompt in prompts_by_id.items()}
+    for engine_name, planned in planned_by_engine.items():
+        if not planned or engine_name not in queue_for_llm:
+            continue
+        fresh_results = await PromptResult.within_freshness_window(brand_id=brand_id, engine=engine_name)
+        fresh_cells = {(prompt_result.prompt_id, prompt_result.market_id) for prompt_result in fresh_results}
+        stale = [cell for cell in planned if (cell.prompt_id, cell.market_id) not in fresh_cells]
+        stale_hashes = {(hash_by_prompt_id[cell.prompt_id], cell.market_id) for cell in stale}
+        fresh_corpus = await QueryResponse.within_freshness_window(stale_cells=stale_hashes, engine=engine_name) if stale_hashes else []
+        corpus_by_cell = {(query_response.query_hash, query_response.market_id): query_response for query_response in fresh_corpus}
+        engine_in_process = in_process.get(engine_name, set())
+        engine_queue = queue_for_llm[engine_name]
+        for cell in stale:
+            key = (hash_by_prompt_id[cell.prompt_id], cell.market_id)
+            corpus = corpus_by_cell.get(key)
+            if corpus is not None and not (cell.web_search and is_no_search_answer(corpus.raw)):
+                continue
+            if key in engine_in_process:
+                continue
+            queued = engine_queue.get(key)
+            rides_free = queued is not None and (queued["web_search"] or not cell.web_search)
+            candidates.append(CandidateCell(cell.prompt_id, cell.market_id, engine_name, cell.web_search, cell.priority, 0.0 if rides_free else rates.usd(engine_name, cell.web_search)))
+    return candidates
+
+
+def _enqueue_within_budget(brand, candidates: list[CandidateCell], prompts_by_id: dict, queue_for_llm: dict[str, dict[tuple[str, str], dict]], budget: BudgetContext) -> set[str]:
+    """Trim the brand's candidates to its remaining monthly budget (long-tail
+    first, then the least important core cells), then queue the rest —
+    deduped across brands by (query_hash, market) per engine."""
+    cap = settings.COLLECTION_BUDGET_LOCAL_USD if brand.footprint == FOOTPRINT_LOCAL else settings.COLLECTION_BUDGET_NATIONAL_USD
+    remaining = budget.remaining(brand.id, cap)
+    kept, dropped = trim_to_budget(candidates, remaining)
+    if dropped:
+        dropped_longtail = sum(1 for cell in dropped if not cell.web_search)
+        logger.warning(f"[collection] budget - brand {brand.id}: ${budget.spend_by_brand.get(brand.id, 0.0):.2f} of ${cap:.2f} spent this month; dropped {len(dropped)} of {len(candidates)} cells ({dropped_longtail} long-tail, {len(dropped) - dropped_longtail} core) to stay under the cap")
+    for cell in kept:
+        prompt = prompts_by_id[cell.prompt_id]
+        key = (query_hash(prompt.text), cell.market_id)
+        subscriber = dict(brand_id=brand.id, prompt_id=cell.prompt_id)
+        queued = queue_for_llm[cell.engine].get(key)
+        if queued is None:
+            queue_for_llm[cell.engine][key] = dict(prompt_id=cell.prompt_id, market_id=cell.market_id, query_text=prompt.text, web_search=cell.web_search, subscribers=[subscriber])
+        else:
+            queued["web_search"] = queued["web_search"] or cell.web_search
+            queued["subscribers"].append(subscriber)
+    budget.spend_by_brand[brand.id] = budget.spend_by_brand.get(brand.id, 0.0) + sum(cell.usd for cell in kept)
+    return fully_dropped_prompt_ids(kept, dropped)
+
+
+def fully_dropped_prompt_ids(kept: list[CandidateCell], dropped: list[CandidateCell]) -> set[str]:
+    """Questions whose every candidate cell the budget dropped (nothing of
+    theirs was sent this run). Pure."""
+    kept_ids = {cell.prompt_id for cell in kept}
+    return {cell.prompt_id for cell in dropped} - kept_ids
+
+
+async def _submit_engine_queues(queue_for_llm: dict[str, dict[tuple[str, str], dict]], task_id: str | None) -> None:
+    """One provider batch per engine per search mode: web-search cells and
+    no-search (long-tail) cells never share a batch, so each batch's
+    cost_event prices one kind of answer. Same corpus key either way."""
     markets_by_id = {market.id: market for market in await Market.all()}
-    failed_engines: list[str] = []
+    attempted: list[str] = []
+    failed: list[str] = []
 
     for engine_name in settings.ACTIVE_ENGINES:
-        query_requests: list[QueryRequest] = []
-        request_metadata: dict = {}
-        for (query_hash_value, market_id), cell in queue_for_llm[engine_name].items():
-            market = markets_by_id.get(market_id)
-            location = LocationContext(city=market.city, state=market.state, zip=market.zip) if market.source != "national" else None
-            custom_id = str(len(query_requests))
-            request_metadata[custom_id] = {
-                "query_hash": query_hash_value,
-                "query_text": cell["query_text"],
-                "prompt_id": cell["prompt_id"],
-                "market_id": market.id,
-                "subscribers": cell["subscribers"],
-            }
-            query_requests.append(QueryRequest(custom_id=custom_id, prompt=cell["query_text"], location=location))
+        for web_search in (True, False):
+            query_requests: list[QueryRequest] = []
+            request_metadata: dict = {}
+            for (query_hash_value, market_id), cell in queue_for_llm[engine_name].items():
+                if cell["web_search"] != web_search:
+                    continue
+                market = markets_by_id.get(market_id)
+                location = LocationContext(city=market.city, state=market.state, zip=market.zip) if market.source != SOURCE_NATIONAL else None
+                custom_id = str(len(query_requests))
+                request_metadata[custom_id] = {
+                    "query_hash": query_hash_value,
+                    "query_text": cell["query_text"],
+                    "prompt_id": cell["prompt_id"],
+                    "market_id": market.id,
+                    WEB_SEARCH_KEY: web_search,
+                    "subscribers": cell["subscribers"],
+                }
+                query_requests.append(QueryRequest(custom_id=custom_id, prompt=cell["query_text"], location=location, use_web_search=None if web_search else False))
 
-        if not query_requests:
-            continue
+            if not query_requests:
+                continue
+            label = f"{engine_name}{'' if web_search else ' (no web search)'}"
+            attempted.append(label)
+            try:
+                batch_handle = await initialize_adapter(adapter=f"{engine_name}_service").submit_batch(query_requests)
+            except Exception as exc:
+                failed.append(label)
+                logger.error(f"[collection] submit_prompt_execution_batch - {label}: submit failed for {len(query_requests)} requests: {type(exc).__name__}: {str(exc)[:300]}")
+                continue
+            await Batch.create(
+                provider=batch_handle.provider,
+                batch_id=batch_handle.batch_id,
+                brand_id=None,
+                status=batch_handle.status,
+                request_metadata=request_metadata,
+                kind=UsageKind.EXECUTE_PROMPTS,
+                task_id=task_id,
+            )
+            await Database.session.commit()
 
-        try:
-            batch_handle = await initialize_adapter(adapter=f"{engine_name}_service").submit_batch(query_requests)
-        except Exception as exc:
-            failed_engines.append(engine_name)
-            logger.error(f"[collection] submit_prompt_execution_batch - {engine_name}: submit failed for {len(query_requests)} requests: {type(exc).__name__}: {str(exc)[:300]}")
-            continue
-        await Batch.create(
-            provider=batch_handle.provider,
-            batch_id=batch_handle.batch_id,
-            brand_id=None,
-            status=batch_handle.status,
-            request_metadata=request_metadata,
-            kind=UsageKind.EXECUTE_PROMPTS,
-            task_id=task_id,
-        )
-        await Database.session.commit()
-
-    if failed_engines and len(failed_engines) == len(settings.ACTIVE_ENGINES):
-        raise RuntimeError(f"submit_prompt_execution_batch: every engine failed to submit ({', '.join(failed_engines)})")
+    if failed and len(failed) == len(attempted):
+        raise RuntimeError(f"submit_prompt_execution_batch: every engine failed to submit ({', '.join(failed)})")
 
 
 async def _in_process_cells() -> dict[str, set[tuple[str, str]]]:
@@ -451,13 +554,17 @@ async def ingest_execution_batch(batch: Batch, results: list[QueryResult]) -> No
             continue
         result_metadata = batch.request_metadata[result.custom_id]
         market = await Market.get(result_metadata["market_id"])
+        raw = result.raw or {}
+        if result_metadata.get(WEB_SEARCH_KEY) is False:
+            # a long-tail answer collected without web search: same corpus key, marked so core cells don't reuse it
+            raw = {**raw, CORPUS_RAW_KEY: {WEB_SEARCH_KEY: False}}
         query_response = await QueryResponse.create(
             query_hash=result_metadata["query_hash"],
             query_text=result_metadata["query_text"],
             market=market,
             engine=batch.provider,
             text=result.text,
-            raw=result.raw or {},
+            raw=raw,
             citations=[asdict(citation) for citation in (result.citations or [])],
         )
         for subscriber in result_metadata["subscribers"]:

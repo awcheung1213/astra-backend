@@ -1,12 +1,16 @@
-"""Kickoff research (deliverable #4, and #5's bootstrap half): the one-shot
-analysis tasks the onboarding launch enqueues (api/onboarding.py is the
-producer; plan updates re-fire #4 when priorities shift).
+"""Kickoff research (deliverable #4, and #5's bootstrap half): the analysis
+tasks the onboarding launch enqueues (api/onboarding.py is the producer; plan
+approvals re-fire #4 when priorities shift, and the monthly discovery cron —
+worker/tasks/schedules.py schedule_question_discovery — re-runs #4 so new
+questions keep arriving in the suggested pool: deduped against every live
+question, brandless, each with a topic. The weekly sorter feeds them into the
+watching rotation, utils/question_tiers.py).
 
 Both are single no-tool agent calls over the brand's confirmed context —
 generation, not judgment — so they use task-specific system prompts (static,
 so prompt caching applies) rather than one of the seven roles."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from adapters.agents.claude_agent import ClaudeAgent
 from adapters.google_adapter import GoogleAdapter, GoogleReadError
@@ -14,7 +18,7 @@ from constants.constants import UsageModel
 from objects.brand import Brand
 from objects.competitor import SOURCE_AI_BOOTSTRAP, Competitor
 from objects.connection import Connection
-from objects.prompt import Prompt
+from objects.prompt import TIER_CORE, TIER_WATCHING, Prompt
 from utils import clock
 from utils.agent_json import parse_agent_json
 from utils.first_plan import queue_first_plan_when_ready
@@ -22,6 +26,7 @@ from utils.logger import logger
 from utils.prompt_signoff import track_default_prompts
 from utils.query_normalization import query_hash
 from utils.question_topics import TOPIC_BACKFILL_SYSTEM, clean_topic, parse_topic_reply, topic_backfill_prompt
+from utils.response_parsing import mentions_name
 from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
 from worker.tasks.metrics import GSC_DATA_LAG_DAYS
@@ -55,13 +60,17 @@ async def research_prompts(task_id: str, brand_id: str) -> None:
             entry_query_hash = query_hash(entry["text"])
             if entry_query_hash in existing_query_hashes:
                 continue  # never duplicates a prompt the brand already has — nor one earlier in this reply
+            if mentions_name(entry["text"], brand.name):
+                continue  # brandless backstop: the HARD RULE is in the system prompt, this catches a slip
             created_prompts.append(await Prompt.create(brand_id=brand.id, text=entry["text"], category=entry["category"], topic=clean_topic(entry.get("topic"), brand.name), created_at=ranked_at + timedelta(microseconds=len(created_prompts))))
             existing_query_hashes.add(entry_query_hash)
-        logger.info(f"[research] brand {brand.id}: {len(created_prompts)} prompts generated (inactive, awaiting sign-off), {len(generated) - len(created_prompts)} duplicates skipped")
+        logger.info(f"[research] brand {brand.id}: {len(created_prompts)} questions added to the suggested pool, {len(generated) - len(created_prompts)} duplicates/branded skipped")
 
-        # landed after launch with nothing tracked: launch had nothing to sign
-        # off, so the default happens here (re-read — launch may have landed
-        # while the agent ran; committed rows + this run's new ones)
+        # landed after launch with nothing leveled: launch had nothing to
+        # level, so the default happens here (re-read — launch may have landed
+        # while the agent ran; committed rows + this run's new ones). A brand
+        # that already has levels is left alone: new questions stay suggested
+        # until the weekly sorter rotates them in
         if (await Brand.get(brand_id)).onboarded_at is not None:
             await track_default_prompts(brand.id, await Prompt.by_brand(brand.id) + created_prompts)
         await queue_first_plan_when_ready(brand.id, task_id)
@@ -127,6 +136,7 @@ async def backfill_question_topics(task_id: str, brand_id: str) -> None:
 
 
 TARGET_PROMPT_COUNT = 15
+RESEARCH_EXISTING_LIMIT = 120  # existing questions listed in the research prompt (all core + watching first, then the newest) — the pool grows monthly; dedupe still checks every one
 TOPIC_BACKFILL_MODEL = UsageModel.CLAUDE_HAIKU_4_5_20251001.value  # labeling, not research: the cheap model
 TOPIC_BACKFILL_BATCH = 50
 TOPIC_BACKFILL_MAX_TOKENS = 4000
@@ -172,8 +182,16 @@ Exclude retailers, marketplaces, aggregators, and directories — only direct co
 Respond with ONLY a JSON array of competitor names, no prose and no code fences: ["Name One", "Name Two"]"""
 
 
+def _listed_existing(existing_prompts: list[Prompt]) -> list[Prompt]:
+    """The existing questions the research prompt lists: leveled ones (core,
+    watching) first, then the newest suggestions, RESEARCH_EXISTING_LIMIT in all."""
+    leveled = [prompt for prompt in existing_prompts if getattr(prompt, "tier", None) in (TIER_CORE, TIER_WATCHING)]
+    rest = sorted((prompt for prompt in existing_prompts if getattr(prompt, "tier", None) not in (TIER_CORE, TIER_WATCHING)), key=lambda prompt: prompt.created_at or datetime.min, reverse=True)
+    return (leveled + rest)[:RESEARCH_EXISTING_LIMIT]
+
+
 def _research_prompt(brand: Brand, existing_prompts: list[Prompt], real_queries: list[dict]) -> str:
-    existing_lines = "\n".join(f"- {existing.text}" for existing in existing_prompts) or "(none yet)"
+    existing_lines = "\n".join(f"- {existing.text}" for existing in _listed_existing(existing_prompts)) or "(none yet)"
     demand_lines = "\n".join(f"- {top_query['query']} ({top_query['clicks']} clicks)" for top_query in real_queries) or "(no Search Console data yet — generate from the brand context alone)"
     return (
         f"Generate {TARGET_PROMPT_COUNT} consumer questions for the brand's category below,\n"

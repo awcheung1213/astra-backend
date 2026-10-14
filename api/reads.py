@@ -18,7 +18,7 @@ framework v1 scores brand-level) and a computed site-health score (counts
 only, no invented formula). Auth rides the router-level guard
 (utils/authz.py); GET /brands scopes by the caller's org itself."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request, status
 
@@ -34,6 +34,7 @@ from objects.metric_point import MetricPoint
 from objects.notification import Notification
 from objects.prompt import Prompt
 from objects.prompt_result import PromptResult
+from objects.question_move import QuestionMove
 from objects.report import Report
 from objects.task import STATUS_DONE, STATUS_QUEUED, STATUS_RUNNING, Task
 from objects.visibility_run import VisibilityRun
@@ -124,11 +125,15 @@ async def overview(brand_id: str) -> dict:
 
 @router.get("/brands/{brand_id}/questions")
 async def questions(brand_id: str) -> dict:
-    """The tracked-questions page: every non-retired prompt with its
-    last-week stats (asked count, mention rate, average rank when ranked),
-    plus the AI answers screen's per-assistant "names you" read (engines,
-    named_count vs last week — utils/answer_stats.py), strongest first, and
-    a summary (rings, "8 of 15 name you", biggest gap)."""
+    """The tracked-questions page: every non-retired question with its level
+    (tier core | watching | suggested, pinned, tier_reason, last_checked_at,
+    topic_group), its last-week stats (asked count, mention rate, average
+    rank when ranked), plus the AI answers screen's per-assistant "names you"
+    read (engines, named_count vs the previous check, noise-gated `change` —
+    utils/answer_stats.py), strongest first. The summary (rings, "4 of 5 name
+    you", biggest gap, up/down) counts CORE questions only; summary.watching
+    is the long tail: {count, checked_this_month, named, new_this_month,
+    by_topic: [{topic_group, count, named}]}."""
     await Brand.get(brand_id)
     results_by_prompt: dict[str, list[PromptResult]] = {}
     for result in await PromptResult.filter(brand_id):
@@ -136,6 +141,8 @@ async def questions(brand_id: str) -> dict:
 
     prompts = await Prompt.by_brand(brand_id)
     answer_rows, summary = await answer_stats.question_answer_stats(brand_id, prompts)
+    now = clock.now()
+    summary["watching"] = answer_stats.watching_summary(prompts, answer_rows, now, await QuestionMove.since(brand_id, datetime(now.year, now.month, 1)))
     question_rows = []
     for prompt in prompts:
         results = results_by_prompt.get(prompt.id, [])
@@ -146,7 +153,12 @@ async def questions(brand_id: str) -> dict:
                 "text": prompt.text,
                 "topic": prompt.topic,
                 "category": prompt.category,
+                "topic_group": answer_stats.topic_group(prompt),
                 "is_active": prompt.is_active,
+                "tier": prompt.tier,
+                "pinned": prompt.pinned,
+                "tier_reason": prompt.tier_reason,
+                "last_checked_at": utc_iso(prompt.last_checked_at),
                 "source": prompt.source,
                 "asked": len(results),
                 "mention_rate": round(sum(result.brand_mentioned for result in results) / len(results), 2) if results else None,

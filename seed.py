@@ -11,6 +11,9 @@ What this sets up, step by step:
        b. Census place-to-county relationship file: city -> county FIPS
        c. BEA CAGDP2: county GDP                         (BEA_API_KEY, .env)
      Without a BEA key/coverage, ranking degrades to population alone.
+     Then the national panel (Lean collection, utils/city_panel.py): 20 of
+     them ranked active (largest city per Census division, then the next
+     largest), the rest kept but inactive, plus the nationwide pseudo-market.
   2. a test organization
   3. one brand under it (Sunrise Dental)
   4. a PENDING site row (connect a real WP/Shopify sandbox via
@@ -107,6 +110,8 @@ async def seed_system_markets(session) -> None:
             markets_created += 1
     await session.flush()
     print(f"1.  seeded {markets_created} system markets (top {TOP_CITIES_PER_STATE} per state)")
+    panel_ranks = await Market.apply_panel()
+    print(f"1d. national panel: {len(panel_ranks)} active system markets (+ nationwide); the other {markets_created - len(panel_ranks)} kept inactive")
 
 
 async def fetch_place_populations(web: httpx.AsyncClient) -> dict[str, dict]:

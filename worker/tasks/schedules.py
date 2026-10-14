@@ -11,7 +11,7 @@ doc), so the cadence roster reads straight off this file. Deliverables that
 deliberately do NOT ride cron are listed at the bottom with reasons.
 """
 
-from objects.brand import Brand
+from objects.brand import FOOTPRINT_NATIONAL, Brand
 from objects.site import Site
 from utils import clock
 from utils.database import Database, ReplicaDatabase
@@ -60,6 +60,24 @@ async def schedule_poll_batches(timestamp: int) -> None:
     logger.info(f"[schedules] schedule_poll_batches tick ts={clock.now()}")
 
 
+@app.periodic(cron="0 6 * * 6")  # Saturday 06:00 UTC — after Thursday's answers land, before Sunday's scoring
+@app.task(name="schedule_borderline_reask", queue="schedules")
+async def schedule_borderline_reask(timestamp: int) -> None:
+    """#18 — borderline re-ask (Lean collection): per launched NATIONAL brand,
+    core questions named in 40-60% of cities this week on an engine get asked
+    in REASK_EXTRA_CITIES more cities on it, under the monthly budget.
+    Per-brand work with a tasks row, so it enqueues through create_task like
+    any brand work (NOT the rule-8 exception); the submit runner dispatches on
+    payload {"reask": true} (worker/tasks/collection.py run_submit_reask_batch)."""
+    async with ReplicaDatabase().connection():
+        async with Database().connection():
+            brands = [brand for brand in await Brand.launched() if brand.footprint == FOOTPRINT_NATIONAL]
+            for brand in brands:
+                await create_task(brand_id=brand.id, name="submit_prompt_execution_batch", queue="collection", payload={"reask": True})
+            await Database.session.commit()
+    logger.info(f"[schedules] schedule_borderline_reask tick ts={clock.now()}: {len(brands)} national brands")
+
+
 ##############################
 # WEEKLY SWEEPS
 ##############################
@@ -84,6 +102,17 @@ async def schedule_site_audits(timestamp: int) -> None:
                 await create_task(brand_id=site.brand_id, name="site_audit", queue="audit")
             await Database.session.commit()
     logger.info(f"[schedules] schedule_site_audits tick ts={clock.now()}: {len(sites)} audits")
+
+
+@app.periodic(cron="0 1 * * 0")  # Sundays 01:00 UTC — an hour after the scoring tick
+@app.task(name="schedule_question_sorter", queue="schedules")
+async def schedule_question_sorter(timestamp: int) -> None:
+    """#4 (ongoing) — the automatic question funnel: promote/demote between
+    core (weekly) and watching (monthly rotation), keep the rotation pool
+    fresh, record each move with its plain-words reason.
+    Runner: worker/tasks/question_sorter.py task "sort_questions"."""
+    count = await _create_task_per_active_brand(name="sort_questions", queue="research")
+    logger.info(f"[schedules] schedule_question_sorter tick ts={clock.now()}: {count} sorts")
 
 
 @app.periodic(cron="0 0 * * 1")  # Mondays 00:00 UTC — the source-poller sweep
@@ -210,6 +239,17 @@ async def schedule_monthly_reports(timestamp: int) -> None:
     logger.info(f"[schedules] schedule_monthly_reports tick ts={clock.now()}: {count} reports")
 
 
+@app.periodic(cron="0 5 1 * *")  # 1st of the month 05:00 UTC
+@app.task(name="schedule_question_discovery", queue="schedules")
+async def schedule_question_discovery(timestamp: int) -> None:
+    """#4 (ongoing) — discovery never stops: research adds new brandless
+    questions (deduped, with topics) to the suggested pool every month; the
+    weekly sorter rotates them into watching.
+    Runner: worker/tasks/research.py task "research_prompts"."""
+    count = await _create_task_per_active_brand(name="research_prompts", queue="research")
+    logger.info(f"[schedules] schedule_question_discovery tick ts={clock.now()}: {count} discoveries")
+
+
 @app.periodic(cron="0 10 1 1,4,7,10 *")  # 1st of Jan/Apr/Jul/Oct 10:00 UTC
 @app.task(name="schedule_quarterly_reviews", queue="schedules")
 async def schedule_quarterly_reviews(timestamp: int) -> None:
@@ -231,7 +271,8 @@ async def schedule_quarterly_reviews(timestamp: int) -> None:
 #       role: it is the client-facing voice, and the interview is relationship
 #       surface (extracting margins/seasonality/constraints from the owner),
 #       not analysis — the same voice that writes the Brief and chases.
-#   #4  Keyword + AI-prompt research — runs at kickoff, re-runs on plan updates.
+#   #4  Keyword + AI-prompt research — runs at kickoff, re-runs on plan updates
+#       (its monthly discovery re-run + the weekly sorter ARE on cron, above).
 #   #5  Competitor & gap analysis — bootstrapped at kickoff; grown continuously
 #       by run-time discovery (~5% sentiment-pack sampling).
 #   #6  Baseline report — the brand's FIRST visibility_run + report, kicked off

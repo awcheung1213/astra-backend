@@ -26,6 +26,7 @@ from objects.organization import Organization  # noqa
 from objects.prompt import Prompt  # noqa
 from objects.prompt_result import PromptResult  # noqa
 from objects.query_response import QueryResponse  # noqa
+from objects.question_move import QuestionMove  # noqa
 from objects.report import Report  # noqa
 from objects.review import Review  # noqa
 from objects.site import Site  # noqa

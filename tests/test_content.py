@@ -92,7 +92,7 @@ async def _seed_calendar_world() -> dict:
         session.add(Artifact(task_id=seed_task.id, brand_id=brand.id, type="calendar", content={"entries": [{"title": "LAST MONTH: whitening guide"}]}, status=STATUS_APPROVED))
         session.add(VisibilityRun(brand_id=brand.id, week_of=date(2026, 8, 24), status=STATUS_DONE, overall_score=0.42))
 
-        prompt = Prompt(brand_id=brand.id, text="best dentist near me", category="local", is_active=True)
+        prompt = Prompt(brand_id=brand.id, text="best dentist near me", category="local", is_active=True, tier="core")
         market = Market(city=f"Testville-{uuid.uuid4().hex[:8]}", state="CA")
         session.add(prompt)
         session.add(market)

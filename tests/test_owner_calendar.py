@@ -246,11 +246,13 @@ async def test_recap_endpoints(monkeypatch):
     monkeypatch.setattr(recap_api.Task, "for_brand", _returns([_task("site_audit", NOW - timedelta(days=1))]))
     monkeypatch.setattr(recap_api.ChangeSet, "for_brand", _returns([_change_set("cs1", "applied", NOW - timedelta(days=2))]))
     monkeypatch.setattr(recap_api, "questions_named_delta", _returns(None))  # covered by test_recap_questions_named_delta
+    moves = [{"prompt_id": "p1", "topic": "Emergency plumber", "from": "watching", "to": "core", "reason": "Competitors get named here and you don't yet"}]
+    monkeypatch.setattr(recap_api, "question_moves", _returns(moves))  # recap_moves: tests/test_question_tiers.py
     monkeypatch.setattr(recap_api.Artifact, "for_brand", _returns([_pitch("sent", NOW - timedelta(days=3))]))
     monkeypatch.setattr(recap_api.User, "mark_recap_seen", mark)
 
     payload = await recap_api.recap("b1", request)
-    assert payload == {"week_of": "2026-10-12", "fixes_live": 1, "emails_sent": 1, "work_days": 2, "questions_named_delta": None, "should_show": True}
+    assert payload == {"week_of": "2026-10-12", "fixes_live": 1, "emails_sent": 1, "work_days": 2, "questions_named_delta": None, "should_show": True, "question_moves": moves}
     assert await recap_api.recap_seen("b1", request) == {"week_of": "2026-10-12", "seen": True}
     assert marked == [("u1", date(2026, 10, 12))]
     user.recap_seen_week = date(2026, 10, 12)
@@ -260,6 +262,7 @@ async def test_recap_endpoints(monkeypatch):
 def test_recap_questions_named_delta():
     from api.recap import named_delta
 
-    assert named_delta({"questions_named": 8, "questions_named_prev": 6}) == 2
-    assert named_delta({"questions_named": 5, "questions_named_prev": 7}) == -2
-    assert named_delta({"questions_named": 8, "questions_named_prev": None}) is None
+    # the noise-gated up minus down (utils/answer_stats.questions_stats' named_delta), not the raw count difference
+    assert named_delta({"questions_named": 8, "questions_named_prev": 6, "named_delta": 1}) == 1
+    assert named_delta({"questions_named": 5, "questions_named_prev": 7, "named_delta": -2}) == -2
+    assert named_delta({"questions_named": 8, "questions_named_prev": None, "named_delta": None}) is None

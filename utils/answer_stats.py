@@ -3,15 +3,40 @@ that assistant NAME the brand this week?
 
 Owner-approved rule (2026-10-14): per question x engine take the latest
 ANALYZED result per market in the scoring week; share = markets that named
-the brand / markets asked; named = share >= NAMED_SHARE_THRESHOLD; rank = the
-average rank over the results that named it. A local brand asks in a handful
-of markets, a national brand in ~150 — the share handles both.
+the brand / markets asked; rank = the average rank over the results that
+named it. A local brand asks in a handful of markets, a national brand in
+~150 — the share handles both.
+
+DEAD ZONE (owner-approved 2026-10-14, replaces pooling — results show the
+same week): "named" is sticky against the PREVIOUS week's state —
+  not named last week -> named once share >= NAMED_ENTER (0.55)
+  named last week     -> stays named until share < NAMED_EXIT (0.45)
+  no previous week    -> named at share >= NAMED_SHARE_THRESHOLD (0.5)
+"Previous week" is the previous CHECK: the state chains oldest -> newest over
+the HISTORY_WEEKS loaded (a week with no answers carries the last state on —
+the long tail is checked about monthly). The chain starts with the plain 0.5
+rule at its oldest week, so a state older than the window is forgotten.
+
+NOISE GATE for "up/down": a question counts as up (down) only when it went
+from named on no assistant to named on at least one (or back) AND on an
+assistant that flipped the same way the share moved more than binomial noise
+for that many cities:
+    |share_now - share_before| > NOISE_Z (1.5) x sqrt(p (1 - p) / n)
+with p = the two weeks' pooled share (named cities / asked cities) and n =
+the cities asked this week. With p = 0 or 1 any change counts. One local city
+(n = 1, a 0 -> 1 flip): pooled p = 0.5, noise 0.75 < 1 -> counts.
+
+The questions endpoint, the one-question answers endpoint and the weekly
+recap all read these functions, so they agree. The tiles/summary count CORE
+questions only (utils/question_tiers.py); the long tail ("watching") gets its
+own summary block, read at each question's latest check.
 
 The week is the questions endpoint's existing "last week" window (the 7-day
-horizon PromptResult.filter reads); the previous week is the 7 days before it.
+horizon PromptResult.filter reads); week k back is the 7 days before that.
 Everything below the loaders is pure (tests/test_answer_stats.py). Reads only:
 corpus rows (query_responses) are looked up, never written."""
 
+import math
 from collections import Counter
 from datetime import date, datetime, timedelta
 from typing import Any, Iterable
@@ -23,18 +48,25 @@ from objects.brand_market import BrandMarket
 from objects.competitor import Competitor
 from objects.competitor_mention import CompetitorMention
 from objects.market import SOURCE_NATIONAL, Market
+from objects.prompt import TIER_CORE, TIER_SUGGESTED, TIER_WATCHING
 from objects.prompt_result import PromptResult
 from objects.query_response import ENGINE_CHATGPT, ENGINE_CLAUDE, ENGINE_GEMINI, QueryResponse
 from schemas.base_schemas import utc_iso
 from utils import clock
 from utils.database import ReplicaDatabase
 
-NAMED_SHARE_THRESHOLD = 0.5
+NAMED_SHARE_THRESHOLD = 0.5  # no previous week to compare against
+NAMED_ENTER = 0.55  # not named last week -> named from here
+NAMED_EXIT = 0.45  # named last week -> stays named until below this
+NOISE_Z = 1.5  # the up/down gate: |delta share| > NOISE_Z x binomial standard error
+HISTORY_WEEKS = 8  # weeks the questions endpoint reads: the dead-zone chain + the long tail's latest check
 WEEK = timedelta(days=7)  # = PromptResult.filter's horizon (the questions page's "last week")
 DISPLAY_ENGINE_ORDER = (ENGINE_CHATGPT, ENGINE_GEMINI, ENGINE_CLAUDE)  # the rings' outer -> inner order
 ALSO_NAMED_LIMIT = 3
 SAMPLE_TEXT_LIMIT = 1500
 NATIONWIDE_LABEL = "Nationwide"
+OTHER_TOPIC_GROUP = "Other"
+MENTION_ID_CHUNK = 10000  # result ids per competitor-mention IN query (asyncpg caps bind params at 32767)
 
 
 ##############################
@@ -67,15 +99,39 @@ async def week_results(brand_id: str, weeks_back: int = 0, prompt_id: str | None
     return await latest_analyzed_results(brand_id, since, until, prompt_id=prompt_id)
 
 
-async def mentions_by_result(brand_id: str, results: list[PromptResult]) -> dict[str, list[CompetitorMention]]:
+async def analyzed_rows(brand_id: str, since: datetime, until: datetime | None = None, prompt_ids: Iterable[str] | None = None) -> list[Any]:
+    """Every ANALYZED result created in (since, until], LIGHT columns only (no
+    answer text) — the multi-week reads (dead-zone chain, long tail, sorter)
+    bucket these with weekly_buckets; engine_stats keeps the newest per market."""
+    statement = (
+        select(PromptResult.id, PromptResult.prompt_id, PromptResult.market_id, PromptResult.engine, PromptResult.brand_mentioned, PromptResult.rank, PromptResult.created_at, PromptResult.query_response_id)  # type: ignore
+        .where(PromptResult.brand_id == brand_id)  # type: ignore
+        .where(PromptResult.analyzed_at.isnot(None))  # type: ignore
+        .where(PromptResult.created_at > since)  # type: ignore
+    )
+    if until is not None:
+        statement = statement.where(PromptResult.created_at <= until)  # type: ignore
+    if prompt_ids is not None:
+        wanted = list(prompt_ids)
+        if not wanted:
+            return []
+        statement = statement.where(PromptResult.prompt_id.in_(wanted))  # type: ignore
+    rows = await ReplicaDatabase.session.execute(statement)  # type: ignore
+    return list(rows.all())
+
+
+async def mentions_by_result(brand_id: str, results: list[Any]) -> dict[str, list[CompetitorMention]]:
     """Competitor mentions per result id, minus names the brand has since
-    excluded (the matcher skips them going forward; old rows still hold them)."""
+    excluded (the matcher skips them going forward; old rows still hold them).
+    Chunked so a multi-week read never exceeds the bind-parameter cap."""
     excluded = await Competitor.excluded_names(brand_id)
+    result_ids = [result.id for result in results]
     grouped: dict[str, list[CompetitorMention]] = {}
-    for mention in await CompetitorMention.by_prompt_result_ids([result.id for result in results]):
-        if mention.normalized_name in excluded:
-            continue
-        grouped.setdefault(mention.prompt_result_id, []).append(mention)
+    for start in range(0, len(result_ids), MENTION_ID_CHUNK):
+        for mention in await CompetitorMention.by_prompt_result_ids(result_ids[start:][:MENTION_ID_CHUNK]):
+            if mention.normalized_name in excluded:
+                continue
+            grouped.setdefault(mention.prompt_result_id, []).append(mention)
     return grouped
 
 
@@ -137,8 +193,19 @@ def not_asked() -> dict:
     return {"named": None, "share": None, "rank": None, "cities": 0, "cities_named": 0}
 
 
-def engine_stats(results: Iterable[Any]) -> dict:
-    """One question x one engine under the owner rule. Not asked -> named/share/rank None."""
+def named_state(share: float, prev_named: bool | None) -> bool:
+    """The dead zone: sticky against the previous week's state (module doc)."""
+    if prev_named is None:
+        return share >= NAMED_SHARE_THRESHOLD
+    if prev_named:
+        return share >= NAMED_EXIT
+    return share >= NAMED_ENTER
+
+
+def engine_stats(results: Iterable[Any], prev_named: bool | None = None) -> dict:
+    """One question x one engine under the owner rule + the dead zone against
+    `prev_named` (the previous week's state; None = no previous week). Not
+    asked -> named/share/rank None."""
     per_market = latest_per_market(results)
     if not per_market:
         return not_asked()
@@ -146,7 +213,7 @@ def engine_stats(results: Iterable[Any]) -> dict:
     share = cities_named / len(per_market)
     ranks = [result.rank for result in per_market if result.brand_mentioned and result.rank is not None]
     return {
-        "named": share >= NAMED_SHARE_THRESHOLD,
+        "named": named_state(share, prev_named),
         "share": round(share, 2),
         "rank": round(sum(ranks) / len(ranks), 1) if ranks else None,
         "cities": len(per_market),
@@ -154,15 +221,93 @@ def engine_stats(results: Iterable[Any]) -> dict:
     }
 
 
+def share_noise(pooled_share: float, cities: int) -> float:
+    """NOISE_Z binomial standard errors of a share over `cities` asked."""
+    if cities <= 0:
+        return math.inf
+    return NOISE_Z * math.sqrt(pooled_share * (1 - pooled_share) / cities)
+
+
+def share_moved(before: dict, now: dict) -> bool:
+    """Did the share move by more than noise between two weeks? (module doc)"""
+    if before.get("share") is None or now.get("share") is None or not before.get("cities") or not now.get("cities"):
+        return False
+    share_before = before["cities_named"] / before["cities"]
+    share_now = now["cities_named"] / now["cities"]
+    pooled = (before["cities_named"] + now["cities_named"]) / (before["cities"] + now["cities"])
+    return abs(share_now - share_before) > share_noise(pooled, now["cities"])
+
+
+def engine_change(before: dict | None, now: dict | None) -> str | None:
+    """ "up" / "down" when this engine's named state flipped AND the share
+    moved more than noise; None otherwise (or when either week wasn't asked)."""
+    if not before or not now or before.get("named") is None or now.get("named") is None or before["named"] == now["named"]:
+        return None
+    if not share_moved(before, now):
+        return None
+    return "up" if now["named"] else "down"
+
+
+def question_change(before: dict[str, dict] | None, now: dict[str, dict] | None) -> str | None:
+    """A question is "up" when it went from named on no assistant to at least
+    one (and an assistant that flipped up passed the noise gate); "down" the
+    reverse; None otherwise."""
+    if not before or not now:
+        return None
+    count_before, count_now = named_count(before), named_count(now)
+    if count_before is None or count_now is None:
+        return None
+    flips = {engine_change(before.get(engine), stats) for engine, stats in now.items()}
+    if count_before == 0 and count_now >= 1 and "up" in flips:
+        return "up"
+    if count_before >= 1 and count_now == 0 and "down" in flips:
+        return "down"
+    return None
+
+
+def weekly_buckets(results: Iterable[Any], now: datetime, weeks: int) -> list[list[Any]]:
+    """Results split into the week windows (index 0 = (now-7d, now], k = k
+    weeks before). Anything outside the `weeks` windows (or in the future) is dropped."""
+    buckets: list[list[Any]] = [[] for _ in range(weeks)]
+    for result in results:
+        if result.created_at is None or result.created_at > now:
+            continue
+        index = int((now - result.created_at) // WEEK)
+        if index < weeks:
+            buckets[index].append(result)
+    return buckets
+
+
+def prompt_history(buckets: list[list[Any]], engines: list[str]) -> list[dict[str, dict]]:
+    """One question's per-week {engine: stats}, index 0 = this week, with the
+    dead-zone state chained oldest -> newest (a week not asked carries the
+    previous state on). `buckets` = that question's results per week window."""
+    history: list[dict[str, dict]] = [{} for _ in buckets]
+    for engine in engines:
+        prev_named: bool | None = None
+        for index in reversed(range(len(buckets))):
+            stats = engine_stats([result for result in buckets[index] if result.engine == engine], prev_named)
+            history[index][engine] = stats
+            if stats["named"] is not None:
+                prev_named = stats["named"]
+    return history
+
+
+def asked_in(week: dict[str, dict]) -> bool:
+    return any(stats["named"] is not None for stats in week.values())
+
+
+def latest_checked_index(history: list[dict[str, dict]], start: int = 0) -> int | None:
+    """The newest week (index >= start) in which any engine was asked."""
+    return next((index for index in range(start, len(history)) if asked_in(history[index])), None)
+
+
 def group_by_prompt_engine(results: Iterable[Any]) -> dict[str, dict[str, list[Any]]]:
+    """{prompt_id: {engine: [results]}} (utils/collection_plan.py's re-ask reads it)."""
     grouped: dict[str, dict[str, list[Any]]] = {}
     for result in results:
         grouped.setdefault(result.prompt_id, {}).setdefault(result.engine, []).append(result)
     return grouped
-
-
-def question_engines(results_by_engine: dict[str, list[Any]], engines: list[str]) -> dict[str, dict]:
-    return {engine: engine_stats(results_by_engine.get(engine, [])) for engine in engines}
 
 
 def named_count(stats_by_engine: dict[str, dict]) -> int | None:
@@ -212,41 +357,128 @@ def biggest_gap(per_engine: dict[str, dict], competitor_names: dict[str, list[st
     return {"engine": gap_engine, "top_competitor": top_competitor(competitor_names.get(gap_engine, []))}
 
 
-def questions_stats(prompts: list[Any], current: list[Any], previous: list[Any], mentions_by_result_id: dict[str, list[Any]], engines: list[str]) -> tuple[dict[str, dict], dict]:
+def tier_of(prompt: Any) -> str:
+    return getattr(prompt, "tier", None) or TIER_SUGGESTED
+
+
+# research's intent labels -> the group names Marco reads ("problem" isn't a heading)
+TOPIC_GROUP_WORDS = {
+    "recommendation": "Asking who to hire",
+    "recommendations": "Asking who to hire",
+    "comparison": "Comparing options",
+    "comparisons": "Comparing options",
+    "problem": "Fixing a problem",
+    "problems": "Fixing a problem",
+    "occasion": "Specific situations",
+    "occasions": "Specific situations",
+    "local": "Near me",
+    "cost": "Prices and costs",
+    "price": "Prices and costs",
+    "pricing": "Prices and costs",
+}
+
+
+def topic_group(prompt: Any) -> str:
+    """The long tail's grouping label, in owner words: the question's category
+    mapped through TOPIC_GROUP_WORDS (an unknown free-text category is shown
+    capitalized), else "Other"."""
+    category = (getattr(prompt, "category", None) or "").strip()
+    if not category:
+        return OTHER_TOPIC_GROUP
+    return TOPIC_GROUP_WORDS.get(category.lower(), category[:1].upper() + category[1:])
+
+
+def question_row_indices(prompt: Any, history: list[dict[str, dict]]) -> tuple[int, int | None]:
+    """(current, previous) week index for one question's row. Core and
+    suggested read THIS week vs LAST week; the long tail (checked about
+    monthly) reads its latest check vs the check before it."""
+    if tier_of(prompt) == TIER_WATCHING:
+        current = latest_checked_index(history)
+        if current is None:
+            return 0, None
+        return current, latest_checked_index(history, current + 1)
+    return 0, (1 if len(history) > 1 else None)
+
+
+def questions_stats(prompts: list[Any], current: list[Any], previous: list[Any], mentions_by_result_id: dict[str, list[Any]], engines: list[str], older: list[list[Any]] | None = None) -> tuple[dict[str, dict], dict]:
     """The questions endpoint's additions: ({prompt_id: {engines, named_count,
-    prev_named_count}}, summary). Every prompt gets a row; the summary counts
-    ACTIVE prompts only. Results from engines outside `engines` are ignored."""
-    current = [result for result in current if result.engine in engines]
-    previous = [result for result in previous if result.engine in engines]
-    current_grouped, previous_grouped = group_by_prompt_engine(current), group_by_prompt_engine(previous)
+    prev_named_count, change}}, summary). Every prompt gets a row; the summary
+    (tiles, rings, biggest gap, up/down) counts CORE prompts only. `older` =
+    the weeks before `previous` (index 2, 3, ...) — they feed the dead-zone
+    chain and the long tail's latest check. Results from engines outside
+    `engines` are ignored."""
+    weeks = [current, previous, *(older or [])]
+    weeks = [[result for result in week if result.engine in engines] for week in weeks]
+    by_prompt_week: dict[str, list[list[Any]]] = {}
+    for index, week in enumerate(weeks):
+        for result in week:
+            by_prompt_week.setdefault(result.prompt_id, [[] for _ in weeks])[index].append(result)
 
     rows: dict[str, dict] = {}
+    current_stats: dict[str, dict[str, dict]] = {}
+    previous_stats: dict[str, dict[str, dict] | None] = {}
     for prompt in prompts:
-        stats = question_engines(current_grouped.get(prompt.id, {}), engines)
+        history = prompt_history(by_prompt_week.get(prompt.id, [[] for _ in weeks]), engines)
+        now_index, before_index = question_row_indices(prompt, history)
+        stats = history[now_index]
+        before = history[before_index] if before_index is not None else None
+        current_stats[prompt.id], previous_stats[prompt.id] = stats, before
         rows[prompt.id] = {
             "engines": {engine: {key: stats[engine][key] for key in ("named", "share", "rank", "cities")} for engine in engines},
             "named_count": named_count(stats),
-            "prev_named_count": named_count(question_engines(previous_grouped.get(prompt.id, {}), engines)),
-            "_stats": stats,
+            "prev_named_count": named_count(before) if before is not None else None,
+            "change": question_change(before, stats),
         }
 
-    active_ids = {prompt.id for prompt in prompts if prompt.is_active}
-    active_stats = {prompt_id: rows[prompt_id]["_stats"] for prompt_id in active_ids}
-    per_engine = per_engine_summary(active_stats, engines)
-    active_current = [result for result in current if result.prompt_id in active_ids]
-    has_previous = any(result.prompt_id in active_ids for result in previous)
-    week = week_of(current)
+    core_ids = [prompt.id for prompt in prompts if tier_of(prompt) == TIER_CORE]
+    per_engine = per_engine_summary({prompt_id: current_stats[prompt_id] for prompt_id in core_ids}, engines)
+    core_set = set(core_ids)
+    core_current = [result for result in weeks[0] if result.prompt_id in core_set]
+    has_previous = any(rows[prompt_id]["prev_named_count"] is not None for prompt_id in core_ids)
+    changes = [rows[prompt_id]["change"] for prompt_id in core_ids]
+    newest_week = week_of(core_current) or week_of(weeks[0])
     summary = {
-        "week_of": week.isoformat() if week else None,
-        "questions_tracked": len(active_ids),
-        "questions_named": sum(1 for prompt_id in active_ids if (rows[prompt_id]["named_count"] or 0) >= 1),
-        "questions_named_prev": sum(1 for prompt_id in active_ids if (rows[prompt_id]["prev_named_count"] or 0) >= 1) if has_previous else None,
+        "week_of": newest_week.isoformat() if newest_week else None,
+        "questions_tracked": len(core_ids),
+        "questions_named": sum(1 for prompt_id in core_ids if (rows[prompt_id]["named_count"] or 0) >= 1),
+        "questions_named_prev": sum(1 for prompt_id in core_ids if (rows[prompt_id]["prev_named_count"] or 0) >= 1) if has_previous else None,
+        "questions_up": changes.count("up"),
+        "questions_down": changes.count("down"),
+        "named_delta": changes.count("up") - changes.count("down") if has_previous else None,  # noise-gated (module doc)
         "per_engine": per_engine,
-        "biggest_gap": biggest_gap(per_engine, competitor_names_by_engine(active_current, mentions_by_result_id), engines),
+        "biggest_gap": biggest_gap(per_engine, competitor_names_by_engine(core_current, mentions_by_result_id), engines),
     }
-    for row in rows.values():
-        del row["_stats"]
     return rows, summary
+
+
+def watching_summary(prompts: list[Any], rows: dict[str, dict], now: datetime, moves: Iterable[Any] = ()) -> dict:
+    """The long-tail block: {count, checked_this_month, named, new_this_month,
+    by_topic: [{topic_group, count, named}]}. named = named on at least one
+    assistant at its latest check (rows from questions_stats). new_this_month =
+    started being watched this calendar month from the suggested pool (or at
+    launch) — a demotion from core isn't "new"."""
+    month_start = datetime(now.year, now.month, 1)
+    watching = [prompt for prompt in prompts if tier_of(prompt) == TIER_WATCHING]
+    came_from: dict[str, str] = {}
+    for move in sorted(moves, key=lambda move: move.created_at or datetime.min):
+        if move.to_tier == TIER_WATCHING:
+            came_from[move.prompt_id] = move.from_tier
+
+    def is_named(prompt: Any) -> bool:
+        return (rows.get(prompt.id, {}).get("named_count") or 0) >= 1
+
+    groups: dict[str, dict] = {}
+    for prompt in sorted(watching, key=lambda prompt: topic_group(prompt).lower()):
+        group = groups.setdefault(topic_group(prompt), {"topic_group": topic_group(prompt), "count": 0, "named": 0})
+        group["count"] += 1
+        group["named"] += int(is_named(prompt))
+    return {
+        "count": len(watching),
+        "checked_this_month": sum(1 for prompt in watching if prompt.last_checked_at is not None and prompt.last_checked_at >= month_start),
+        "named": sum(1 for prompt in watching if is_named(prompt)),
+        "new_this_month": sum(1 for prompt in watching if prompt.tier_changed_at is not None and prompt.tier_changed_at >= month_start and came_from.get(prompt.id, TIER_SUGGESTED) == TIER_SUGGESTED),
+        "by_topic": sorted(groups.values(), key=lambda group: (-group["count"], group["topic_group"].lower())),
+    }
 
 
 def strength_sort_key(row: dict) -> tuple:
@@ -315,12 +547,14 @@ def truncate_answer(text: str, limit: int = SAMPLE_TEXT_LIMIT) -> str:
     return cut.rstrip() + "…"
 
 
-def engine_answer_row(engine: str, results: list[Any], market_order: list[str], mentions_by_result_id: dict[str, list[Any]], markets: dict[str, Any], corpus_by_id: dict[str, Any]) -> dict:
+def engine_answer_row(engine: str, results: list[Any], market_order: list[str], mentions_by_result_id: dict[str, list[Any]], markets: dict[str, Any], corpus_by_id: dict[str, Any], prev_named: bool | None = None, previous: dict | None = None) -> dict:
     """One engine's block on the one-question screen. The sample's text and
     date come from the corpus answer (falling back to the result's own copy
     if the corpus row is missing); businesses_named/also_named describe that
-    same answer, so the "#2 of 4 named" line matches the text shown."""
-    stats = engine_stats(results)
+    same answer, so the "#2 of 4 named" line matches the text shown.
+    prev_named / previous: the previous check's state and stats (the dead zone
+    and the noise-gated `change` — the same reads as the questions endpoint)."""
+    stats = engine_stats(results, prev_named)
     sample = sample_result(results, market_order)
     row: dict = {
         "engine": engine,
@@ -329,6 +563,7 @@ def engine_answer_row(engine: str, results: list[Any], market_order: list[str], 
         "cities_asked": stats["cities"],
         "cities_named": stats["cities_named"],
         "rank": stats["rank"],
+        "change": engine_change(previous, stats),
         "businesses_named": None,
         "also_named": [],
         "sample": None,
@@ -349,17 +584,19 @@ def engine_answer_row(engine: str, results: list[Any], market_order: list[str], 
     return row
 
 
-async def question_answer_stats(brand_id: str, prompts: list[Any]) -> tuple[dict[str, dict], dict]:
-    """questions_stats over this week + last week for the questions endpoint.
-    Competitor mentions are loaded only for the biggest-gap engine's answers
-    (a national brand's week is thousands of results; one engine's is a third)."""
+async def question_answer_stats(brand_id: str, prompts: list[Any], with_gap_competitor: bool = True) -> tuple[dict[str, dict], dict]:
+    """questions_stats over the last HISTORY_WEEKS weeks (light rows, one
+    read) for the questions endpoint and the recap. Competitor mentions are
+    loaded only for the biggest-gap engine's core answers this week (a
+    national brand's week is thousands of results; one engine's is a third)."""
     engines = display_engines(settings.ACTIVE_ENGINES)
-    current = await week_results(brand_id, weeks_back=0)
-    previous = await week_results(brand_id, weeks_back=1)
-    rows, summary = questions_stats(prompts, current, previous, {}, engines)
+    now = clock.now()
+    rows = await analyzed_rows(brand_id, since=now - WEEK * HISTORY_WEEKS, until=now)
+    weeks = weekly_buckets(rows, now, HISTORY_WEEKS)
+    question_rows, summary = questions_stats(prompts, weeks[0], weeks[1], {}, engines, older=weeks[2:])
     gap = summary["biggest_gap"]
-    if gap is not None:
-        active_ids = {prompt.id for prompt in prompts if prompt.is_active}
-        gap_results = [result for result in current if result.engine == gap["engine"] and result.prompt_id in active_ids]
+    if gap is not None and with_gap_competitor:
+        core_ids = {prompt.id for prompt in prompts if tier_of(prompt) == TIER_CORE}
+        gap_results = [result for result in weeks[0] if result.engine == gap["engine"] and result.prompt_id in core_ids]
         gap["top_competitor"] = top_competitor(competitor_names_by_engine(gap_results, await mentions_by_result(brand_id, gap_results)).get(gap["engine"], []))
-    return rows, summary
+    return question_rows, summary

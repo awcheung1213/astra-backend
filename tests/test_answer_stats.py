@@ -16,8 +16,8 @@ def _result(prompt_id="p1", engine="chatgpt", market_id="m1", mentioned=False, r
     return SimpleNamespace(id=result_id, prompt_id=prompt_id, engine=engine, market_id=market_id, brand_mentioned=mentioned, rank=rank, created_at=created_at, query_response_id=query_response_id or f"qr-{result_id}", text=f"result text {result_id}")
 
 
-def _prompt(prompt_id, is_active=True):
-    return SimpleNamespace(id=prompt_id, is_active=is_active)
+def _prompt(prompt_id, is_active=True, tier=None):
+    return SimpleNamespace(id=prompt_id, is_active=is_active, tier=tier or ("core" if is_active else "suggested"), category=None, last_checked_at=None, tier_changed_at=None)
 
 
 def _mention(result, name, position=None):
@@ -125,6 +125,9 @@ def test_empty_brand_summary():
         "questions_tracked": 1,
         "questions_named": 0,
         "questions_named_prev": None,
+        "questions_up": 0,
+        "questions_down": 0,
+        "named_delta": None,
         "per_engine": {engine: {"questions_named": 0, "of": 0} for engine in ENGINES},
         "biggest_gap": None,
     }
@@ -243,7 +246,7 @@ def test_engine_answer_row_uses_corpus_answer_and_sample_mentions():
 
 def test_engine_answer_row_not_asked():
     row = answer_stats.engine_answer_row("claude", [], [], {}, {}, {})
-    assert row == {"engine": "claude", "named": None, "share": None, "cities_asked": 0, "cities_named": 0, "rank": None, "businesses_named": None, "also_named": [], "sample": None}
+    assert row == {"engine": "claude", "named": None, "share": None, "cities_asked": 0, "cities_named": 0, "rank": None, "change": None, "businesses_named": None, "also_named": [], "sample": None}
 
 
 def test_businesses_named_floors_at_listed_rank_and_counts_brand_only_when_named():

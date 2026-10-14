@@ -83,8 +83,8 @@ async def test_signoff_enqueues_collection_via_create_task(monkeypatch):
     async def fake_brand_get(brand_id):
         return SimpleNamespace(id=brand_id)
 
-    async def fake_activate(brand_id, prompt_ids):
-        return len(prompt_ids)
+    async def fake_record_move(brand_id, prompt_id, from_tier, to_tier, reason_code, automatic=True, pinned=None):
+        return None
 
     async def fake_create_task(**kwargs):
         enqueued.append(kwargs)
@@ -96,9 +96,9 @@ async def test_signoff_enqueues_collection_via_create_task(monkeypatch):
     monkeypatch.setattr(prompts_api.Brand, "get", fake_brand_get)
 
     async def labeled_prompts(brand_id):
-        return []  # nothing unlabeled -> only the collection job
+        return [SimpleNamespace(id=prompt_id, tier="suggested", pinned=False, topic="Topic", created_at=None) for prompt_id in ("p1", "p2")]  # labeled -> only the collection job
 
-    monkeypatch.setattr(prompt_signoff.Prompt, "activate", fake_activate)
+    monkeypatch.setattr(prompt_signoff, "record_move", fake_record_move)
     monkeypatch.setattr(prompt_signoff.Prompt, "by_brand", labeled_prompts)
     monkeypatch.setattr(prompt_signoff, "create_task", fake_create_task)  # the shared sign-off path
     monkeypatch.setattr(collection.submit_prompt_execution_batch, "defer_async", forbidden_defer)

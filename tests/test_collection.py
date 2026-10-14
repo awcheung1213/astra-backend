@@ -118,7 +118,7 @@ def _seed_collection_rows(session) -> dict:
     organization = Organization(name=f"test-org-{uuid.uuid4()}")
     session.add(organization)
     brand = Brand(organization_id=organization.id, name=f"Brand {uuid.uuid4().hex[:8]}", website_url="https://example.com")
-    prompt = Prompt(brand_id=brand.id, text="best dentist near me", category="local", is_active=True)
+    prompt = Prompt(brand_id=brand.id, text="best dentist near me", category="local", is_active=True, tier="core")
     market = Market(city=f"Testville-{uuid.uuid4().hex[:8]}", state="CA")
     return {"organization": organization, "brand": brand, "prompt": prompt, "market": market}
 
