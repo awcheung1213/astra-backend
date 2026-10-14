@@ -17,7 +17,7 @@ from objects.visibility_run import STATUS_DONE, VisibilityRun
 from objects.visibility_run_market import VisibilityRunMarket
 from schemas.prompt_result_schemas import CompetitorMention as CompetitorMentionSchema
 from schemas.prompt_result_schemas import PromptResultWithCompetitorMentions
-from utils import clock
+from utils import answer_stats, clock
 from utils.logger import logger
 from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
 from worker.app import app
@@ -28,8 +28,8 @@ async def visibility_run(task_id: str, brand_id: str) -> None:
     """#17 — one brand's weekly sweep: newest analyzed answers -> per-market
     scores -> one framework-versioned trend point. Idempotent per brand-week
     (get-or-create), so retries resume safely. $0 — score-only, no LLM calls."""
-    async with task_lifecycle(task_id):
-        await run_visibility_sweep(brand_id)
+    async with task_lifecycle(task_id) as task:
+        await run_visibility_sweep(brand_id, rescore=bool((task.payload or {}).get("rescore")))
 
 
 # framework 1.0.0 weights — unconditional rates over all answers, sum to 1.0
@@ -136,13 +136,16 @@ def _group_by_market(scored_results: list[PromptResultWithCompetitorMentions], n
     return results_by_market
 
 
-async def run_visibility_sweep(brand_id: str) -> VisibilityRun | None:
+async def run_visibility_sweep(brand_id: str, rescore: bool = False) -> VisibilityRun | None:
     """One brand's weekly sweep. Idempotent per brand-week: retries resume the
     existing run; an already-done run short-circuits. Returns None when the
     brand has nothing analyzed to score (no run row — no trend gap)."""
     brand = await Brand.get(brand_id)
 
-    prompt_results = await PromptResult.filter(brand_id=brand.id, contains_sentiment_analysis=True)
+    # only the cities we ask now (panel + nationwide / home cities + re-ask
+    # cities): answers from switched-off cities don't skew the week's score
+    counted = await answer_stats.counted_market_ids(brand.id)
+    prompt_results = [result for result in await PromptResult.filter(brand_id=brand.id, contains_sentiment_analysis=True) if result.market_id in counted]
     if not prompt_results:
         logger.info(f"[visibility] brand {brand.id} has no analyzed results; skipping sweep")
         return None
@@ -157,9 +160,12 @@ async def run_visibility_sweep(brand_id: str) -> VisibilityRun | None:
     results_by_market = _group_by_market(scored_results, national_market_ids)
 
     run = await VisibilityRun.get_or_create_for_week(brand.id, week_of_today())
-    if run.status == STATUS_DONE:
+    if run.status == STATUS_DONE and not rescore:
         logger.info(f"[visibility] run {run.id} already done for brand {brand.id} week {run.week_of}; skipping")
         return run
+    # rescore: newly analyzed answers landed this week (the onboarding first
+    # fill, Monday's sweep, a borderline re-ask) — the week's ONE trend point is
+    # recomputed in place, never a second point
 
     await VisibilityRunMarket.delete_for_run(run.id)
     for market_id, market_results in results_by_market.items():

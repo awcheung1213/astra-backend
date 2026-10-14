@@ -53,6 +53,11 @@ async def test_poll_attributes_sentiment_spend_to_the_brands_org_and_keeps_corpu
     monkeypatch.setattr(collection, "initialize_adapter", lambda adapter: FakeEngine())
     monkeypatch.setattr(collection, "ingest_sentiment_batch", fake_ingest)
     monkeypatch.setattr(collection, "ingest_execution_batch", fake_ingest)
+
+    async def no_scoring(brand_ids):
+        return None  # event-driven scoring has its own tests
+
+    monkeypatch.setattr(collection, "score_brands_whose_answers_landed", no_scoring)
     monkeypatch.setattr(Database, "get_session", lambda self: FakeSession())
 
     await collection.run_poll_batches()

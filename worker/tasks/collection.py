@@ -27,7 +27,7 @@ from utils.logger import logger
 from utils.query_normalization import query_hash
 from utils.question_tiers import questions_to_collect
 from utils.response_parsing import mentions_name, parse_prompt_result_for_mention_rank
-from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
+from utils.task_queue import RETRY_WITH_BACKOFF, create_task, task_lifecycle
 from utils.urls import domain_from_url
 from worker.app import app
 from worker.tasks.visibility import hydrate_prompt_result
@@ -381,6 +381,7 @@ async def run_poll_batches() -> None:
     work)
     """
     batches = await Batch.unprocessed()
+    touched_brand_ids: set[str] = set()
 
     for batch in batches:
         engine = initialize_adapter(adapter=f"{batch.provider}_service")
@@ -414,6 +415,43 @@ async def run_poll_batches() -> None:
             await ingest_execution_batch(batch, results)
         await Batch.mark_processed(batch.id, status=status)
         await Database.session.commit()
+        touched_brand_ids |= batch_brand_ids(batch)
+
+    await score_brands_whose_answers_landed(touched_brand_ids)
+
+
+async def score_brands_whose_answers_landed(touched_brand_ids: set[str]) -> None:
+    """Event-driven scoring: a brand whose batches this poll finished, and that
+    has nothing else in flight (no answers still being collected, no analysis
+    pending), is scored now — a new customer sees results hours after launch
+    instead of on the next weekly tick, and Monday's sweep / a re-ask re-score
+    the week as their answers land. visibility_run's per-brand queueing lock
+    keeps it to one waiting run per brand."""
+    if not touched_brand_ids:
+        return
+    pending = await Batch.unprocessed()
+    for brand_id in sorted(touched_brand_ids):
+        if not brand_has_pending_batches(pending, brand_id):
+            await create_task(brand_id=brand_id, name="visibility_run", queue="visibility", payload={"rescore": True})
+    await Database.session.commit()
+
+
+def batch_brand_ids(batch) -> set[str]:
+    """The brands a batch's answers belong to: a sentiment batch's own brand,
+    an execution batch's subscribers. Pure."""
+    if batch.kind == UsageKind.SENTIMENT_ANALYSIS.value:
+        return {batch.brand_id} if batch.brand_id else set()
+    brand_ids: set[str] = set()
+    for key, entry in (getattr(batch, "request_metadata", None) or {}).items():
+        if key.startswith("__") or not isinstance(entry, dict):
+            continue
+        brand_ids |= {subscriber["brand_id"] for subscriber in entry.get("subscribers") or [] if subscriber.get("brand_id")}
+    return brand_ids
+
+
+def brand_has_pending_batches(unprocessed: list, brand_id: str) -> bool:
+    """Anything of the brand's still in flight (collection or analysis). Pure."""
+    return any(brand_id in batch_brand_ids(batch) for batch in unprocessed)
 
 
 async def _batch_cost_organization_id(batch: Batch) -> str | None:

@@ -39,7 +39,7 @@ async def _create_task_per_active_brand(name: str, queue: str, payload: dict | N
 ##############################
 
 
-@app.periodic(cron="0 0 * * 4")  # Thursday 00:00 UTC
+@app.periodic(cron="0 0 * * 1")  # Mondays 00:00 UTC — the weekly visibility sweep (scored as soon as answers land)
 @app.task(name="schedule_submit_prompt_execution_batch", queue="schedules")
 async def schedule_submit_prompt_execution_batch(timestamp: int) -> None:
     """#18 — collect the week's AI answers: one corpus-deduped batch per engine."""
@@ -47,7 +47,7 @@ async def schedule_submit_prompt_execution_batch(timestamp: int) -> None:
     logger.info(f"[schedules] schedule_submit_prompt_execution_batch tick ts={clock.now()}")
 
 
-@app.periodic(cron="0 * * * *")  # hourly
+@app.periodic(cron="*/10 * * * *")  # every 10 minutes — status checks are free, and a new customer's first results shouldn't wait an hour per step
 @app.task(name="schedule_poll_batches", queue="schedules")
 async def schedule_poll_batches(timestamp: int) -> None:
     """#18 — ingest finished provider batches (execution -> corpus, sentiment -> analysis).
@@ -60,7 +60,7 @@ async def schedule_poll_batches(timestamp: int) -> None:
     logger.info(f"[schedules] schedule_poll_batches tick ts={clock.now()}")
 
 
-@app.periodic(cron="0 6 * * 6")  # Saturday 06:00 UTC — after Thursday's answers land, before Sunday's scoring
+@app.periodic(cron="0 6 * * 1")  # Mondays 06:00 UTC — after the sweep's answers land; its answers re-score the week when they land
 @app.task(name="schedule_borderline_reask", queue="schedules")
 async def schedule_borderline_reask(timestamp: int) -> None:
     """#18 — borderline re-ask (Lean collection): per launched NATIONAL brand,
@@ -83,7 +83,7 @@ async def schedule_borderline_reask(timestamp: int) -> None:
 ##############################
 
 
-@app.periodic(cron="0 0 * * 0")  # Sundays 00:00 UTC
+@app.periodic(cron="0 12 * * 1")  # Mondays 12:00 UTC — FALLBACK: scoring is event-driven (poll scores a brand when its answers land); this catches anyone not scored yet this week
 @app.task(name="schedule_visibility_run", queue="schedules")
 async def schedule_visibility_run(timestamp: int) -> None:
     """#17 — score the week's analyzed answers into one trend point per brand."""
@@ -104,7 +104,7 @@ async def schedule_site_audits(timestamp: int) -> None:
     logger.info(f"[schedules] schedule_site_audits tick ts={clock.now()}: {len(sites)} audits")
 
 
-@app.periodic(cron="0 1 * * 0")  # Sundays 01:00 UTC — an hour after the scoring tick
+@app.periodic(cron="0 13 * * 1")  # Mondays 13:00 UTC — after the sweep, the re-ask and the fallback scoring
 @app.task(name="schedule_question_sorter", queue="schedules")
 async def schedule_question_sorter(timestamp: int) -> None:
     """#4 (ongoing) — the automatic question funnel: promote/demote between
@@ -125,7 +125,7 @@ async def schedule_metrics_ingestion(timestamp: int) -> None:
     logger.info(f"[schedules] schedule_metrics_ingestion tick ts={clock.now()}: {count} ingestions")
 
 
-@app.periodic(cron="0 2 * * 1")  # Mondays 02:00 UTC — after the sweep's ingestion lands
+@app.periodic(cron="30 13 * * 1")  # Mondays 13:30 UTC — after the week's scores settle
 @app.task(name="schedule_alert_detection", queue="schedules")
 async def schedule_alert_detection(timestamp: int) -> None:
     """#19 — thresholds & change-points over fresh metrics (index drops, CWV
@@ -135,7 +135,7 @@ async def schedule_alert_detection(timestamp: int) -> None:
     logger.info(f"[schedules] schedule_alert_detection tick ts={clock.now()}: {count} detections")
 
 
-@app.periodic(cron="0 6 * * 1")  # Mondays 06:00 UTC — the Pulse week-opener
+@app.periodic(cron="0 14 * * 1")  # Mondays 14:00 UTC (7am Pacific) — the week-opener, after the sweep is scored
 @app.task(name="schedule_weekly_briefs", queue="schedules")
 async def schedule_weekly_briefs(timestamp: int) -> None:
     """Pulse — the Account Manager's Brief: serif voice over assembler facts.

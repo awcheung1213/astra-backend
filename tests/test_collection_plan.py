@@ -400,9 +400,9 @@ async def test_reask_cron_enqueues_one_task_per_launched_national_brand(monkeypa
     assert enqueued == [{"brand_id": "nat", "name": "submit_prompt_execution_batch", "queue": "collection", "payload": {"reask": True}}]
 
 
-def test_reask_cron_runs_saturday_morning_before_sunday_scoring():
+def test_reask_cron_runs_monday_morning_after_the_sweep():
     source = open(schedules.__file__).read()
-    assert '@app.periodic(cron="0 6 * * 6")  # Saturday 06:00 UTC' in source  # Sat 06:00 -> Sun 00:00 scoring: 18h for answers + analysis
+    assert '@app.periodic(cron="0 6 * * 1")  # Mondays 06:00 UTC' in source  # Mon 00:00 sweep -> 06:00 re-ask; its answers re-score the week when they land
 
 
 def test_only_sent_questions_count_as_checked():
@@ -422,3 +422,24 @@ def _stamps(state):
         state.setdefault("checked", []).extend(ids)
 
     return mark_checked
+
+
+def test_scoring_waits_until_nothing_of_the_brand_is_in_flight():
+    from types import SimpleNamespace
+
+    from worker.tasks.collection import batch_brand_ids, brand_has_pending_batches
+
+    execution = SimpleNamespace(kind="execute_prompts", brand_id=None, request_metadata={"__engine__": "claude", "0": {"subscribers": [{"brand_id": "b1", "prompt_id": "p"}, {"brand_id": "b2", "prompt_id": "p"}]}})
+    sentiment = SimpleNamespace(kind="sentiment_analysis", brand_id="b3", request_metadata={})
+    assert batch_brand_ids(execution) == {"b1", "b2"} and batch_brand_ids(sentiment) == {"b3"}
+    assert brand_has_pending_batches([execution], "b1") and not brand_has_pending_batches([sentiment], "b1")
+
+
+def test_weekly_sweep_runs_on_monday():
+    import inspect
+
+    import worker.tasks.schedules as schedules
+
+    source = inspect.getsource(schedules)
+    assert '@app.periodic(cron="0 0 * * 1")  # Mondays 00:00 UTC — the weekly visibility sweep' in source
+    assert '@app.periodic(cron="*/10 * * * *")' in source

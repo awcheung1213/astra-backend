@@ -44,6 +44,7 @@ from typing import Any, Iterable
 from sqlalchemy import select
 
 import settings
+from objects.brand import FOOTPRINT_LOCAL, Brand
 from objects.brand_market import BrandMarket
 from objects.competitor import Competitor
 from objects.competitor_mention import CompetitorMention
@@ -53,6 +54,7 @@ from objects.prompt_result import PromptResult
 from objects.query_response import ENGINE_CHATGPT, ENGINE_CLAUDE, ENGINE_GEMINI, QueryResponse
 from schemas.base_schemas import utc_iso
 from utils import clock
+from utils.city_panel import reask_cities
 from utils.database import ReplicaDatabase
 
 NAMED_SHARE_THRESHOLD = 0.5  # no previous week to compare against
@@ -74,6 +76,19 @@ MENTION_ID_CHUNK = 10000  # result ids per competitor-mention IN query (asyncpg 
 ##############################
 
 
+async def counted_market_ids(brand_id: str) -> set[str]:
+    """The cities a brand's numbers count: its CURRENT collection markets
+    (national: the panel + nationwide; local: its home cities) plus, for
+    national brands, the borderline re-ask cities. Answers from cities that
+    were switched off (the pre-panel 151-city fills) stay stored but no longer
+    count — "named in X of N cities" always means the cities we ask now."""
+    brand = await Brand.get(brand_id)
+    ids = {market.id for market in await Market.by_brand(brand_id=brand.id, brand_footprint=brand.footprint)}
+    if brand.footprint != FOOTPRINT_LOCAL:
+        ids |= {market.id for market in reask_cities(await Market.reask_pool(), settings.REASK_EXTRA_CITIES)}
+    return ids
+
+
 async def latest_analyzed_results(brand_id: str, since: datetime, until: datetime | None = None, prompt_id: str | None = None) -> list[PromptResult]:
     """Newest ANALYZED result per (prompt, market, engine) created in (since, until] —
     PromptResult.filter's DISTINCT ON statement with an explicit window, so the
@@ -90,6 +105,7 @@ async def latest_analyzed_results(brand_id: str, since: datetime, until: datetim
         statement = statement.where(PromptResult.created_at <= until)  # type: ignore
     if prompt_id is not None:
         statement = statement.where(PromptResult.prompt_id == prompt_id)  # type: ignore
+    statement = statement.where(PromptResult.market_id.in_(list(await counted_market_ids(brand_id))))  # type: ignore
     rows = await ReplicaDatabase.session.execute(statement)  # type: ignore
     return list(rows.scalars().all())
 
@@ -116,6 +132,7 @@ async def analyzed_rows(brand_id: str, since: datetime, until: datetime | None =
         if not wanted:
             return []
         statement = statement.where(PromptResult.prompt_id.in_(wanted))  # type: ignore
+    statement = statement.where(PromptResult.market_id.in_(list(await counted_market_ids(brand_id))))  # type: ignore
     rows = await ReplicaDatabase.session.execute(statement)  # type: ignore
     return list(rows.all())
 
