@@ -45,8 +45,10 @@ SKIP_WHILE_IN_FLIGHT_TASKS = {"plan_update"}
 
 # procrastinate 3.x ships this function in its schema exactly for callers on
 # their own connection (composite type: queue, task_name, priority, lock,
-# queueing_lock, args jsonb, scheduled_at)
-_DEFER_SQL = text("SELECT procrastinate_defer_jobs_v1(ARRAY[ROW(:queue, :task_name, :priority, :lock, :queueing_lock, CAST(:args AS jsonb), NULL)::procrastinate_job_to_defer_v1])")
+# queueing_lock, args jsonb, scheduled_at). scheduled_at is computed on the
+# DATABASE clock — the one the worker's fetch compares against (infra time,
+# never utils.clock's simulated time); NULL delay -> NULL = run now.
+_DEFER_SQL = text("SELECT procrastinate_defer_jobs_v1(ARRAY[ROW(:queue, :task_name, :priority, :lock, :queueing_lock, CAST(:args AS jsonb), now() + CAST(:delay_seconds AS integer) * interval '1 second')::procrastinate_job_to_defer_v1])")
 
 
 async def create_task(
@@ -58,6 +60,7 @@ async def create_task(
     token_budget: int | None = None,
     queueing_lock: str | None = None,
     lock: str | None = None,
+    delay_seconds: int | None = None,
 ) -> Task | None:
     """Create a tasks row + its queue job atomically. Returns the Task, or None
     when the queueing lock says an identical job is already waiting, or a
@@ -68,6 +71,9 @@ async def create_task(
     defer order (e.g. f"site:{site_id}": one change-set apply per site).
     queueing_lock: at most one job with it waiting in the queue; defaults to
     f"{name}:{brand_id}" for PER_BRAND_QUEUEING_LOCK_TASKS.
+    delay_seconds: the job becomes runnable this many seconds after the
+    commit's clock (procrastinate scheduled_at) — same single commit, so a
+    rolled-back caller leaves neither row nor scheduled job.
 
     Job args carry only ids (JSON-only rule); the task function loads everything else from the tasks row.
     """
@@ -78,11 +84,11 @@ async def create_task(
     if queueing_lock is None and name in PER_BRAND_QUEUEING_LOCK_TASKS:
         queueing_lock = f"{name}:{brand_id}"
     if queueing_lock is None:
-        return await _create_task_and_job(session, brand_id, name, payload, queue, priority, token_budget, None, lock)
+        return await _create_task_and_job(session, brand_id, name, payload, queue, priority, token_budget, None, lock, delay_seconds)
     try:
         # savepoint: a lock collision rolls back only this row + job, not the caller's transaction
         async with session.begin_nested():
-            return await _create_task_and_job(session, brand_id, name, payload, queue, priority, token_budget, queueing_lock, lock)
+            return await _create_task_and_job(session, brand_id, name, payload, queue, priority, token_budget, queueing_lock, lock, delay_seconds)
     except IntegrityError as exc:
         if QUEUEING_LOCK_CONSTRAINT not in str(exc):
             raise
@@ -90,7 +96,7 @@ async def create_task(
         return None
 
 
-async def _create_task_and_job(session, brand_id: str, name: str, payload: dict | None, queue: str, priority: int, token_budget: int | None, queueing_lock: str | None, lock: str | None) -> Task:
+async def _create_task_and_job(session, brand_id: str, name: str, payload: dict | None, queue: str, priority: int, token_budget: int | None, queueing_lock: str | None, lock: str | None, delay_seconds: int | None = None) -> Task:
     task = Task(brand_id=brand_id, name=name, payload=payload or {}, priority=priority, token_budget=token_budget)
     session.add(task)
     await session.flush()
@@ -104,6 +110,7 @@ async def _create_task_and_job(session, brand_id: str, name: str, payload: dict 
             "lock": lock,
             "queueing_lock": queueing_lock,
             "args": json.dumps({"task_id": task.id, "brand_id": brand_id}),
+            "delay_seconds": int(delay_seconds) if delay_seconds else None,
         },
     )
     return task

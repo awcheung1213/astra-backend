@@ -212,9 +212,14 @@ def _issues(findings: list[Finding], proposals: list[Artifact], change_sets: lis
 async def _done_for_you(brand_id: str, change_sets: list[ChangeSet], artifacts_by_id: dict[str, Artifact], since) -> list[dict]:
     """Outcomes only (receipts.done_for_you): live/undone fixes, written work,
     audits and research with what they found, reports. Internal plumbing
-    (applies, collection batches, syncs, ticks, client tasks) never appears."""
+    (applies, collection batches, syncs, ticks, client tasks) never appears.
+    A sent pitch is "outreach_sent" ("Emailed <site>"), dated by its send."""
     items: list = receipts.change_outcomes(change_sets, artifacts_by_id, since)
-    items += [receipts.artifact_outcome(artifact) for artifact in await Artifact.created_since(brand_id, since)]
+    recent_artifacts = await Artifact.created_since(brand_id, since)
+    items += [receipts.artifact_outcome(artifact) for artifact in recent_artifacts]
+    # a pitch found before the window but EMAILED inside it is dated by its send
+    recent_ids = {artifact.id for artifact in recent_artifacts}
+    items += [receipts.artifact_outcome(pitch) for pitch in await Artifact.for_brand(brand_id, type="pitch", statuses=[STATUS_APPROVED]) if pitch.id not in recent_ids]
     items += [receipts.report_outcome(report) for report in await Report.for_brand(brand_id) if report.published_at and report.published_at >= since]
 
     audits = await Task.done_since(brand_id, ["site_audit"])

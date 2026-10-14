@@ -49,5 +49,18 @@ DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://localhost:5173")
 # environment needs no new variable.
 WORDPRESS_CONNECT_CALLBACK_URL = os.environ.get("WORDPRESS_CONNECT_CALLBACK_URL") or GOOGLE_OAUTH_REDIRECT_URL.replace("/connections/google/callback", "/connections/wordpress/callback")
 
+# outreach email — sending an approved pitch from the owner's own mailbox.
+# Gmail rides the Google OAuth app above (scope gmail.send). Outlook needs a
+# Microsoft identity-platform app (multitenant + personal accounts, delegated
+# Mail.Send); empty = the outlook route is unavailable. The callback defaults
+# to the Google callback's host, like WordPress's.
+MICROSOFT_OAUTH_CLIENT_ID = os.environ.get("MICROSOFT_OAUTH_CLIENT_ID", "")
+MICROSOFT_OAUTH_CLIENT_SECRET = os.environ.get("MICROSOFT_OAUTH_CLIENT_SECRET", "")
+MICROSOFT_OAUTH_REDIRECT_URL = os.environ.get("MICROSOFT_OAUTH_REDIRECT_URL") or GOOGLE_OAUTH_REDIRECT_URL.replace("/connections/google/callback", "/connections/microsoft/callback")
+# the fallback route for any other mailbox: Resend, From outreach@EMAIL_FROM_DOMAIN
+# (a domain verified in Resend), Reply-To + CC the owner. Either empty = unavailable.
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+EMAIL_FROM_DOMAIN = os.environ.get("EMAIL_FROM_DOMAIN", "")
+
 
 TEST_URL = ""

@@ -10,7 +10,13 @@ Auth rides the router-level guard (utils/authz.py) — these routes accept
 secrets, which is why the guard had to land before any public deploy. The
 Google callback lives on public_router: Google's browser redirect carries no
 bearer token, so its HMAC-signed state IS the auth. WordPress one-tap's
-callback lives there too, for the same reason."""
+callback lives there too, for the same reason — and so does the Microsoft
+(Outlook mailbox) callback.
+
+Mailboxes for outreach email (provider "gmail" / "outlook") ride the same
+state + callback machinery: gmail is one more provider on the Google OAuth
+app (send-only scope); outlook is a Microsoft identity-platform app. GET
+email_sender reports which route an approved pitch would take."""
 
 import base64
 import hashlib
@@ -28,6 +34,8 @@ import settings
 from adapters import google_adapter
 from adapters.cms.common import CmsWriteError
 from adapters.google_adapter import GoogleReadError
+from adapters.mail import outlook as outlook_mail
+from adapters.mail.gmail import GMAIL_SCOPES, consented_mailbox
 from objects.brand import PLATFORM_SHOPIFY, PLATFORM_WORDPRESS, Brand
 from objects.connection import Connection
 from objects.site import STATUS_CONNECTED, STATUS_DISCONNECTED, STATUS_ERROR, STATUS_PENDING, Site
@@ -35,6 +43,7 @@ from objects.task import STATUS_DONE, Task
 from schemas.base_schemas import utc_iso
 from schemas.connection_schemas import ConnectionsResponse, PickPropertyRequest, ProviderStatusResponse, SiteConnectRequest, SiteStatusResponse, WordPressAuthorizeRequest
 from utils.logger import logger
+from utils.pitch_mail import ROUTE_GMAIL, ROUTE_OUTLOOK, mail_return_url, owner_email_for, resolve_sender
 from utils.token_crypto import decrypt_credentials, encrypt_credentials
 from worker.tasks.changes import ADAPTER_BY_PLATFORM
 
@@ -141,7 +150,12 @@ def _site_status(site: Site) -> SiteStatusResponse:
 GOOGLE_PROVIDER_SCOPES = {
     "gsc": "https://www.googleapis.com/auth/webmasters.readonly",
     "ga4": "https://www.googleapis.com/auth/analytics.readonly",
+    # outreach email: send-only (never a read scope) + openid email, which
+    # names the authorized address (gmail.send can't call users.getProfile)
+    ROUTE_GMAIL: GMAIL_SCOPES,
 }
+# the providers with a property to pick (gmail has none)
+PROPERTY_PROVIDERS = ("gsc", "ga4")
 # generous: a first-time consent can involve account choosers, permission
 # review, even a mid-flow detour — an expired state costs a full retry
 STATE_TTL_SECONDS = 1800
@@ -196,16 +210,11 @@ def match_gsc_property(properties: list[str], website_url: str) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-@router.post("/brands/{brand_id}/connections/{provider}/authorize")
-async def google_authorize(brand_id: str, provider: str) -> dict:
-    """Returns the Google consent URL; the SPA navigates to it directly.
-    access_type=offline + prompt=consent because Google only returns a
-    refresh token on a forced consent."""
-    brand = await Brand.get(brand_id)
-    if provider not in GOOGLE_PROVIDER_SCOPES:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"provider must be one of {sorted(GOOGLE_PROVIDER_SCOPES)}")
-    if not settings.GOOGLE_OAUTH_CLIENT_ID:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Google OAuth is not configured")
+def google_authorize_url(provider: str, state: str, login_hint: str | None = None) -> str:
+    """The Google consent URL for one provider. access_type=offline +
+    prompt=consent because Google only returns a refresh token on a forced
+    consent; gmail adds include_granted_scopes + the owner's address as
+    login_hint (one less account chooser). Pure."""
     params = {
         "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
         "redirect_uri": settings.GOOGLE_OAUTH_REDIRECT_URL,
@@ -213,9 +222,31 @@ async def google_authorize(brand_id: str, provider: str) -> dict:
         "scope": GOOGLE_PROVIDER_SCOPES[provider],
         "access_type": "offline",
         "prompt": "consent",
-        "state": mint_state(brand.id, provider),
+        "state": state,
     }
-    return {"url": f"{google_adapter.GOOGLE_AUTH_URL}?{urlencode(params, quote_via=quote)}"}
+    if provider == ROUTE_GMAIL:
+        params["include_granted_scopes"] = "true"
+        if login_hint:
+            params["login_hint"] = login_hint
+    return f"{google_adapter.GOOGLE_AUTH_URL}?{urlencode(params, quote_via=quote)}"
+
+
+@router.post("/brands/{brand_id}/connections/{provider}/authorize")
+async def google_authorize(brand_id: str, provider: str) -> dict:
+    """Returns the consent URL; the SPA navigates to it directly. Google for
+    gsc/ga4/gmail; Microsoft for outlook (dispatched here because this route
+    pattern would otherwise swallow it)."""
+    brand = await Brand.get(brand_id)
+    if provider == ROUTE_OUTLOOK:
+        if not outlook_mail.microsoft_configured():
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Outlook sending isn't set up yet.")
+        return {"url": outlook_mail.outlook_authorize_url(mint_state(brand.id, ROUTE_OUTLOOK), await owner_email_for(brand))}
+    if provider not in GOOGLE_PROVIDER_SCOPES:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"provider must be one of {sorted([*GOOGLE_PROVIDER_SCOPES, ROUTE_OUTLOOK])}")
+    if not settings.GOOGLE_OAUTH_CLIENT_ID:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Google OAuth is not configured")
+    login_hint = await owner_email_for(brand) if provider == ROUTE_GMAIL else None
+    return {"url": google_authorize_url(provider, mint_state(brand.id, provider), login_hint)}
 
 
 @public_router.get("/connections/google/callback")
@@ -226,7 +257,9 @@ async def google_callback(state: str = "", code: str = "", error: str = "") -> R
     property pick. Bounces back to the dashboard with the outcome."""
 
     def back(provider: str, result: str) -> RedirectResponse:
-        return RedirectResponse(f"{settings.DASHBOARD_URL}/?screen=connect&google={provider}&result={result}", status_code=status.HTTP_302_FOUND)
+        # gmail returns to the tasks screen, where the pitch he was sending waits
+        url = mail_return_url(ROUTE_GMAIL, result) if provider == ROUTE_GMAIL else f"{settings.DASHBOARD_URL}/?screen=connect&google={provider}&result={result}"
+        return RedirectResponse(url, status_code=status.HTTP_302_FOUND)
 
     decoded = verify_state(state)
     if decoded is None:
@@ -254,6 +287,16 @@ async def google_callback(state: str = "", code: str = "", error: str = "") -> R
             # can happen when a prior grant exists; prompt=consent makes this rare
             logger.error(f"brand {brand_id}: google returned no refresh token")
             return back(provider, "error")
+
+        if provider == ROUTE_GMAIL:
+            mailbox = consented_mailbox(tokens)
+            if mailbox is None:
+                # send permission unticked on the granular consent screen (or no verified address)
+                logger.info(f"brand {brand_id}: gmail consent without send permission")
+                return back(provider, "denied")
+            await Connection.upsert(brand_id, ROUTE_GMAIL, STATUS_CONNECTED, encrypt_credentials({"refresh_token": refresh_token, "email": mailbox}), meta={"email": mailbox})
+            logger.info(f"brand {brand_id}: gmail connected for outreach email")
+            return back(provider, "connected")
 
         if provider == "gsc":
             brand = await Brand.get(brand_id)
@@ -311,12 +354,15 @@ async def google_pick_property(brand_id: str, provider: str, request: PickProper
 
 @router.delete("/brands/{brand_id}/connections/{provider}", response_model=ProviderStatusResponse)
 async def google_disconnect(brand_id: str, provider: str) -> ProviderStatusResponse:
-    """Revoke at Google (best effort) and forget the connection."""
+    """Revoke at Google (best effort) and forget the connection. Mailboxes
+    (gmail/outlook) are forgotten WITHOUT a provider revoke: a Google revoke
+    kills the whole grant for our app — with include_granted_scopes that
+    would take GSC/GA4 down with it — and Microsoft has no per-app revoke."""
     brand = await Brand.get(brand_id)
-    if provider not in GOOGLE_PROVIDER_SCOPES:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"provider must be one of {sorted(GOOGLE_PROVIDER_SCOPES)}")
+    if provider not in GOOGLE_PROVIDER_SCOPES and provider != ROUTE_OUTLOOK:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"provider must be one of {sorted([*GOOGLE_PROVIDER_SCOPES, ROUTE_OUTLOOK])}")
     connection = await Connection.get_for_brand_provider(brand.id, provider)
-    if connection is not None and connection.credentials_encrypted:
+    if connection is not None and connection.credentials_encrypted and provider in PROPERTY_PROVIDERS:
         try:
             await google_adapter.revoke_google_token(decrypt_credentials(connection.credentials_encrypted)["refresh_token"])
         except Exception as exc:
@@ -326,12 +372,67 @@ async def google_disconnect(brand_id: str, provider: str) -> ProviderStatusRespo
 
 
 async def _google_connection(brand_id: str, provider: str) -> Connection:
-    if provider not in GOOGLE_PROVIDER_SCOPES:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"provider must be one of {sorted(GOOGLE_PROVIDER_SCOPES)}")
+    if provider not in PROPERTY_PROVIDERS:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"provider must be one of {sorted(PROPERTY_PROVIDERS)}")
     connection = await Connection.get_for_brand_provider(brand_id, provider)
     if connection is None or not connection.credentials_encrypted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"no {provider} consent on file — connect first")
     return connection
+
+
+##############################
+# OUTREACH EMAIL (which mailbox a pitch goes out from)
+##############################
+
+
+@router.get("/brands/{brand_id}/email_sender")
+async def email_sender(brand_id: str) -> dict:
+    """How an approved pitch would go out right now: {route: gmail|outlook|
+    evergreen|none, connected, from_address, from_name, reply_to,
+    owner_email}. gmail/outlook unconnected = the frontend's connect step;
+    none = copy-paste. See utils/pitch_mail.py."""
+    return await resolve_sender(await Brand.get(brand_id))
+
+
+@public_router.get("/connections/microsoft/callback")
+async def microsoft_callback(state: str = "", code: str = "", error: str = "") -> RedirectResponse:
+    """Microsoft's browser redirect after the Outlook consent — the signed
+    state is the auth (same mint/verify as Google's). Exchanges the code,
+    names the mailbox (Graph /me), stores the encrypted refresh token, and
+    bounces to the tasks screen with the outcome."""
+
+    def back(result: str) -> RedirectResponse:
+        return RedirectResponse(mail_return_url(ROUTE_OUTLOOK, result), status_code=status.HTTP_302_FOUND)
+
+    decoded = verify_state(state)
+    if decoded is None or decoded.get("provider") != ROUTE_OUTLOOK:
+        stale = verify_state(state, ignore_exp=True)
+        if decoded is None and stale is not None and stale.get("provider") == ROUTE_OUTLOOK:
+            logger.info(f"brand {stale['brand_id']}: microsoft callback with expired state — asking for a retry")
+            return back("expired")
+        logger.error("microsoft callback with invalid state — rejected")
+        return back("error")
+    brand_id = decoded["brand_id"]
+    if error:
+        logger.info(f"brand {brand_id}: microsoft consent declined ({error})")
+        return back("denied" if error in ("access_denied", "consent_required") else "error")
+
+    try:
+        tokens = await outlook_mail.exchange_microsoft_code(code)
+        refresh_token = tokens.get("refresh_token")
+        if not refresh_token or not tokens.get("access_token"):
+            logger.error(f"brand {brand_id}: microsoft returned no refresh token")
+            return back("error")
+        mailbox = await outlook_mail.microsoft_account_email(tokens["access_token"], tokens.get("id_token"))
+        if not mailbox:
+            logger.error(f"brand {brand_id}: microsoft consent named no mailbox")
+            return back("error")
+        await Connection.upsert(brand_id, ROUTE_OUTLOOK, STATUS_CONNECTED, encrypt_credentials({"refresh_token": refresh_token, "email": mailbox}), meta={"email": mailbox})
+    except Exception as exc:
+        logger.error(f"brand {brand_id}: microsoft callback failed: {type(exc).__name__}")
+        return back("error")
+    logger.info(f"brand {brand_id}: outlook connected for outreach email")
+    return back("connected")
 
 
 ##############################

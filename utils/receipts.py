@@ -18,6 +18,7 @@ from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, STATUS_PENDI
 from objects.change_set import STATUS_APPLIED, STATUS_FAILED, STATUS_REVERTED
 from objects.finding import SEVERITY_SERIOUS, STATUS_FIXED, STATUS_OPEN
 from schemas.base_schemas import utc_iso
+from utils.pitch_mail import sent_at as pitch_sent_at
 from worker.tasks.site_audit import FIXABLE_KINDS, KIND_BLOCKED_AI_CRAWLER, KIND_BROKEN_LINK, KIND_MISSING_H1, KIND_MISSING_META_DESCRIPTION, KIND_MISSING_SCHEMA, KIND_MISSING_SITEMAP, KIND_MISSING_TITLE, KIND_SLOW_PAGE, visible_text
 
 TEXT_MAX_CHARS = 160  # before/after snippets on the change detail
@@ -622,6 +623,12 @@ def artifact_outcome(artifact) -> dict | None:
     elif artifact.type == "pitch":
         where = str(content.get("where") or "")
         host = urlparse(where).netloc.removeprefix("www.") if is_url(where) else ""
+        emailed_at = pitch_sent_at(content)
+        if emailed_at is not None:
+            # the email actually went out: dated when it was sent, not found
+            recipient = str((content.get("send") or {}).get("to") or "")
+            place = host or (recipient.rsplit("@", 1)[-1] if "@" in recipient else "")
+            return {"id": artifact.id, "kind": "outreach_sent", "title": f"Emailed {place}" if place else "Sent an email for your business", "when": emailed_at, "ref": _ref("artifact", artifact.id)}
         kind, title = "outreach", f"Found a chance to get your business mentioned on {host}" if host else "Found a chance to get your business mentioned"
     elif artifact.type == "reply":
         rating = evidence.get("rating")

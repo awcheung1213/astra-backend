@@ -36,6 +36,14 @@ class User(SQLModel, BaseObject, table=True):
         return rows.scalars().first()
 
     @staticmethod
+    async def owner_for_organization(organization_id: str) -> "User | None":
+        """The org's owner: its FIRST user (the one who signed up — one org
+        per user today, so usually the only one). Outreach email goes out
+        from / replies come back to this person's mailbox."""
+        rows = await ReplicaDatabase.session.execute(select(User).where(User.organization_id == organization_id).order_by(User.created_at).limit(1))  # type: ignore
+        return rows.scalars().first()
+
+    @staticmethod
     async def upsert_from_claims(auth_sub: str, email: str) -> "User":
         """JIT provisioning: the first valid token creates the row (org-less,
         which is what routes the FE into onboarding); later logins keep email

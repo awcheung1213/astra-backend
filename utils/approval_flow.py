@@ -9,8 +9,9 @@ Hands-off actually ship work instead of parking it in a queue nobody reads.
 
 The floor (architecture rule 7) is CODE, never expressible as an
 approval_settings row: work that leaves the building under the brand's name —
-a public review reply, GBP posts going live, an outreach pitch to a stranger —
-always waits for a human, no matter the preset. Site changes (change_proposal,
+a public review reply, GBP posts going live, an outreach pitch emailed to a
+stranger from the owner's own mailbox — always waits for a human, no matter
+the preset. Site changes (change_proposal,
 draft, calendar) are deliberately NOT floor: every operation the change-set
 engine applies carries a rollback record, and auto-shipping that reversible
 tier is exactly what the presets exist for."""
@@ -22,12 +23,14 @@ from objects.site import Site
 from objects.task import Task
 from utils.database import Database
 from utils.logger import logger
+from utils.pitch_mail import SEND_DELAY_SECONDS, SEND_SCHEDULED
 from utils.task_queue import create_task
 from worker.tasks.changes import APPLY_ENABLED_PLATFORMS, operations_for_artifact
 
 # rule 7: the floor. Everything here is outward + irreversible — once a reply
-# is posted, a pitch is sent, or a GBP post is live, no rollback record can
-# unsay it — so a human always clicks. (flag_request never dispatches and
+# is posted, a pitch is emailed, or a GBP post is live, no rollback record can
+# unsay it — so a human always clicks (a pitch's 30-second unsend window is
+# a courtesy, not a rollback). (flag_request never dispatches and
 # informational types never sit at pending review, so neither needs a row.)
 ALWAYS_APPROVE_ARTIFACT_TYPES = {"reply", "gbp_touches", "pitch"}
 
@@ -64,8 +67,18 @@ async def needs_site_connection(brand_id: str, artifact_type: str) -> bool:
 
 async def fan_out_approval(artifact: Artifact, approved_rows: list[int] | None = None) -> list[str]:
     """What an approval sets in motion, by artifact type. Types with no entry
-    need nothing: a pitch is approved-then-HUMAN-sent (the design boundary),
-    and informational types never sit at pending review."""
+    need nothing (informational types never sit at pending review)."""
+    if artifact.type == "pitch":
+        # approving a pitch SENDS it: the review endpoint validated the
+        # recipient + route and stamped content["send"] scheduled; the email
+        # goes out after the unsend window (utils/pitch_mail.py)
+        send = artifact.content.get("send") or {}
+        if send.get("status") != SEND_SCHEDULED:
+            logger.info(f"[approvals] pitch {artifact.id} approved with no scheduled send — nothing to dispatch")
+            return []
+        await create_task(brand_id=artifact.brand_id, name="send_pitch", queue="outreach", payload={"artifact_id": artifact.id, "send_id": send.get("id")}, delay_seconds=SEND_DELAY_SECONDS)
+        return ["send_pitch"]
+
     if artifact.type == "calendar":
         # #11 — one content_draft per approved entry (approved_rows narrows it)
         entries = artifact.content.get("entries", [])

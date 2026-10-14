@@ -82,6 +82,25 @@ class Artifact(SQLModel, BaseObject, table=True):
         return artifact
 
     @staticmethod
+    async def set_content(id: str, content: dict, status: str | None = None) -> "Artifact":
+        """Replace the content (a NEW dict, so the jsonb change is detected) and
+        optionally move the status — the pitch-send state machine's writer.
+        Returning to pending_review clears the verdict stamp."""
+        artifact = await Database.session.get(Artifact, id)
+        if not artifact:
+            raise ArtifactNotFound()
+        artifact.content = dict(content)
+        if status is not None:
+            artifact.status = status
+            if status == STATUS_PENDING_REVIEW:
+                artifact.reviewed_by = None
+                artifact.reviewed_at = None
+        Database.session.add(artifact)
+        await Database.session.flush()
+        await Database.session.refresh(artifact)
+        return artifact
+
+    @staticmethod
     async def pending_for_brand(brand_id: str) -> list["Artifact"]:
         """The approvals queue, oldest first — review in arrival order."""
         rows = await ReplicaDatabase.session.execute(select(Artifact).where(Artifact.brand_id == brand_id).where(Artifact.status == STATUS_PENDING_REVIEW).order_by(Artifact.created_at))  # type: ignore
