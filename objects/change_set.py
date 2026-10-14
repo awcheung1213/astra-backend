@@ -31,6 +31,7 @@ class ChangeSet(SQLModel, BaseObject, table=True):
     status: str = Field(default=STATUS_PENDING, sa_column=Column(String, server_default=STATUS_PENDING, nullable=False))
     operations: list = Field(default_factory=list, sa_column=Column(JSONB, nullable=False, server_default="[]"))
     applied_at: datetime | None = Field(default=None, sa_column=Column(DateTime, nullable=True))
+    verification: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))  # a live re-read after apply: {status, checked_at, attempts}
     reverted_by_change_set_id: str | None = Field(default=None, sa_column=Column(String, ForeignKey("change_sets.id"), nullable=True))
     created_at: datetime = Field(default=None, sa_column=Column(DateTime, default=clock.column_default(), server_default=func.now(), nullable=False))
 
@@ -49,6 +50,13 @@ class ChangeSet(SQLModel, BaseObject, table=True):
         if not change_set:
             raise ChangeSetNotFound()
         return change_set
+
+    @staticmethod
+    async def set_verification(id: str, verification: dict) -> None:
+        change_set = await ChangeSet.get(id)
+        change_set.verification = verification
+        Database.session.add(change_set)
+        await Database.session.flush()
 
     @staticmethod
     async def get_for_update(id: str) -> "ChangeSet":

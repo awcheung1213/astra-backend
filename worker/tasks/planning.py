@@ -139,7 +139,8 @@ def _plan_prompt(brand: Brand, facts: dict) -> str:
         "Respond with ONLY a JSON object, no prose and no code fences:\n"
         '{"summary_markdown": "the plan narrative, for the owner",\n'
         ' "workstreams": [{"name": "...", "why": "tied to a fact", "expected_impact": "...", "effort": "low|medium|high", "first_moves": ["..."],\n'
-        '                  "needs_client_data": true ONLY when the workstream depends on data only the client can collect (e.g. an original study)}],\n'
+        '                  "client_asks": [] unless the workstream depends on facts only the owner has — then at most 3 questions he can answer in one line on his phone,\n'
+        '                                 each {"key": "snake_case", "question": "plain words, no jargon", "kind": "number|text", "unit": "e.g. $ a month, or null", "optional": true|false}}],\n'
         ' "stop_doing": ["..."]}\n\n'
         f"Brand: {brand.name} ({brand.website_url})\n"
         f"Category: {brand.category}\n"

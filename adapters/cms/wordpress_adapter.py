@@ -12,6 +12,13 @@ composite (a JSON-LD block, a fixed link) is a `content` write the agent
 composes after READING the current content — there are no per-SEO-feature
 branches here on purpose (agent-tools-plan.md Phase 1).
 
+Google descriptions: with Yoast SEO active, Google reads YOAST's description
+(`_yoast_wpseo_metadesc`), not the excerpt — so a meta_description write goes
+to that meta key. Yoast doesn't expose the key over REST; the free
+SEO_BRIDGE_PLUGIN from the wordpress.org directory does. When the key isn't
+writable, the write raises SeoBridgeNeeded BEFORE touching anything and the
+engine asks the owner to approve `install_plugin` (undo = deactivate).
+
 Contract with the engine: every write READS the current value of the SAME
 field first, checkpoints it BEFORE writing, and returns it as previous_value
 (reverts restore it); anything created checkpoints + returns created_ref, and
@@ -22,10 +29,19 @@ from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.session import HttpMethod
 
-from adapters.cms.common import WRITE_TIMEOUT_SECONDS, Checkpoint, CmsWriteError, markdown_to_html, no_checkpoint, path_slug
+from adapters.cms.common import WRITE_TIMEOUT_SECONDS, Checkpoint, CmsWriteError, SeoBridgeNeeded, markdown_to_html, no_checkpoint, path_slug
 from objects.site import Site
 from utils.site_fetch import RequestsError, site_session
 from utils.token_crypto import decrypt_credentials
+
+SEO_BRIDGE_PLUGIN = "seo-fields-api-support"  # wordpress.org slug: registers Yoast's title/description meta for REST writes
+YOAST_DESCRIPTION_META = "_yoast_wpseo_metadesc"
+SEO_YOAST = "yoast"
+
+
+def seo_plugin_from_namespaces(namespaces: list[str]) -> str | None:
+    """The SEO plugin a site runs, from its REST index namespaces. Pure."""
+    return SEO_YOAST if "yoast/v1" in namespaces else None
 
 
 class WordPressAdapter:
@@ -59,6 +75,10 @@ class WordPressAdapter:
                 return await self._publish_page(client, operation["value"], operation.get("created_ref"), checkpoint)
             if operation["op"] == "unpublish_page":
                 return await self._unpublish_page(client, operation["target"], checkpoint)
+            if operation["op"] == "install_plugin":
+                return await self._install_plugin(client, operation["value"]["slug"], checkpoint)
+            if operation["op"] == "deactivate_plugin":
+                return await self._set_plugin_status(client, operation["target"], "inactive", checkpoint)
 
             kind, page = await self._page_for_url(client, operation["target"])
             if operation["op"] == "update_page":
@@ -94,11 +114,58 @@ class WordPressAdapter:
     ##############################
 
     async def _set_field(self, client: AsyncSession, kind: str, page: dict, field: str, value, checkpoint: Checkpoint = no_checkpoint) -> dict:
+        if field == "meta_description" and await self._seo_plugin(client) == SEO_YOAST:
+            return await self._set_yoast_description(client, kind, page, value, checkpoint)
         native = self.resolve_field(field)
         previous_value = _raw(page.get(native))
         await checkpoint({"previous_value": previous_value})
         await self._request(client, "POST", f"/wp-json/wp/v2/{kind}/{page['id']}", {native: value})
         return {"previous_value": previous_value}
+
+    async def _set_yoast_description(self, client: AsyncSession, kind: str, page: dict, value, checkpoint: Checkpoint = no_checkpoint) -> dict:
+        """Yoast's own description field. context=edit lists only REST-registered
+        meta, so a missing key = the bridge isn't installed: raise before any
+        write (nothing to roll back)."""
+        raw_meta = page.get("meta")
+        meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
+        if YOAST_DESCRIPTION_META not in meta:
+            raise SeoBridgeNeeded(f"yoast description isn't writable over REST on {self.base_url} (install {SEO_BRIDGE_PLUGIN})")
+        previous_value = meta.get(YOAST_DESCRIPTION_META) or ""
+        await checkpoint({"previous_value": previous_value})
+        await self._request(client, "POST", f"/wp-json/wp/v2/{kind}/{page['id']}", {"meta": {YOAST_DESCRIPTION_META: value}})
+        return {"previous_value": previous_value}
+
+    async def _install_plugin(self, client: AsyncSession, slug: str, checkpoint: Checkpoint = no_checkpoint) -> dict:
+        """Install + activate a wordpress.org plugin (REST /wp/v2/plugins).
+        Already installed -> just activate it. created_ref = the plugin's
+        "dir/file" id (what the undo deactivates); previous_value = its prior
+        status (None when it wasn't installed)."""
+        existing = await self._plugin_by_slug(client, slug)
+        if existing is not None:
+            await checkpoint({"previous_value": existing.get("status"), "created_ref": existing["plugin"]})
+            if existing.get("status") != "active":
+                await self._request(client, "POST", f"/wp-json/wp/v2/plugins/{existing['plugin']}", {"status": "active"})
+            return {"previous_value": existing.get("status"), "created_ref": existing["plugin"]}
+        await checkpoint({"previous_value": None})
+        installed = await self._request(client, "POST", "/wp-json/wp/v2/plugins", {"slug": slug, "status": "active"})
+        await checkpoint({"created_ref": installed["plugin"]})
+        return {"previous_value": None, "created_ref": installed["plugin"]}
+
+    async def _set_plugin_status(self, client: AsyncSession, plugin: str, status: str, checkpoint: Checkpoint = no_checkpoint) -> dict:
+        current = await self._request(client, "GET", f"/wp-json/wp/v2/plugins/{plugin}")
+        await checkpoint({"previous_value": current.get("status")})
+        await self._request(client, "POST", f"/wp-json/wp/v2/plugins/{plugin}", {"status": status})
+        return {"previous_value": current.get("status")}
+
+    async def _plugin_by_slug(self, client: AsyncSession, slug: str) -> dict | None:
+        plugins = await self._request(client, "GET", f"/wp-json/wp/v2/plugins?search={slug}")
+        return next((plugin for plugin in plugins if str(plugin.get("plugin", "")).split("/", 1)[0] == slug), None)
+
+    async def _seo_plugin(self, client: AsyncSession) -> str | None:
+        if not hasattr(self, "_seo_plugin_name"):
+            index = await self._request(client, "GET", "/wp-json/")
+            self._seo_plugin_name = seo_plugin_from_namespaces(index.get("namespaces") or [])
+        return self._seo_plugin_name
 
     async def _update_page(self, client: AsyncSession, kind: str, page: dict, value: dict, checkpoint: Checkpoint = no_checkpoint) -> dict:
         previous_value = {"title": _raw(page.get("title")), "meta_description": _raw(page.get("excerpt")), "body_markdown": _raw(page.get("content"))}

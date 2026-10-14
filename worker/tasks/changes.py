@@ -19,24 +19,27 @@ The writes themselves live in adapters/cms/ (rule 6 — the only door to the
 outside world); a platform not in APPLY_ENABLED_PLATFORMS still gets its
 change set recorded at approval (durable, pending), just never enqueued."""
 
+import html
+import re
 from datetime import timedelta
 
 from sqlalchemy import select
 
-from adapters.cms.common import Checkpoint, CmsWriteError
+from adapters.cms.common import Checkpoint, CmsWriteError, SeoBridgeNeeded
 from adapters.cms.shopify_adapter import ShopifyAdapter
-from adapters.cms.wordpress_adapter import WordPressAdapter
+from adapters.cms.wordpress_adapter import SEO_BRIDGE_PLUGIN, WordPressAdapter
 from objects.artifact import Artifact
 from objects.brand import Brand
-from objects.change_set import STATUS_APPLIED, STATUS_APPLYING, STATUS_REVERTED, ChangeSet
+from objects.change_set import STATUS_APPLIED, STATUS_APPLYING, STATUS_FAILED, STATUS_PENDING, STATUS_REVERTED, ChangeSet
 from objects.finding import STATUS_FIXED, STATUS_OPEN, Finding
 from objects.notification import KIND_UPDATE, Notification
 from objects.site import Site
 from utils import clock
 from utils.database import Database
 from utils.logger import logger
-from utils.receipts import CHANGE_NOTICE_BATCH_HOURS, batched_change_notice, change_notification_text, finding_fix_transition, live_fix_change_set_id, proposal_finding_ids, reopened_detail, resolved_detail
-from utils.task_queue import RETRY_WITH_BACKOFF, task_lifecycle
+from utils.receipts import CHANGE_NOTICE_BATCH_HOURS, FIX_DID_NOT_TAKE_KEY, batched_change_notice, change_notification_text, finding_fix_transition, live_fix_change_set_id, proposal_finding_ids, reopened_detail, resolved_detail
+from utils.site_fetch import fetch_page
+from utils.task_queue import RETRY_WITH_BACKOFF, create_task, task_lifecycle
 from worker.app import app
 
 
@@ -61,7 +64,14 @@ async def change_set_apply(task_id: str, brand_id: str) -> None:
         for operation in change_set.operations:
             if operation.get("completed_at"):
                 continue  # rule 2: a retried apply RESUMES, never repeats
-            apply_result = await _apply_operation(site, operation, _checkpoint_for(change_set.id, operation["id"]))
+            try:
+                apply_result = await _apply_operation(site, operation, _checkpoint_for(change_set.id, operation["id"]))
+            except SeoBridgeNeeded as needed:
+                # not a failure to retry: the owner has to OK a helper plugin first
+                logger.info(f"[changes] change set {change_set.id}: {needed} — parked, asking the owner")
+                await park_for_seo_bridge(change_set, task.id)
+                await Database.session.commit()
+                return
             await ChangeSet.mark_operation_complete(change_set.id, operation["id"], apply_result)
             await Database.session.commit()  # the marker must survive a later op's failure
             applied_count += 1
@@ -70,6 +80,8 @@ async def change_set_apply(task_id: str, brand_id: str) -> None:
         # same commit as the status flip: an issue closes the moment its fix is
         # live and reopens when the undo lands — never one without the other
         await sync_findings_with_fix(change_set.artifact_id)
+        await Database.session.commit()
+        await after_applied(change_set)
         await Database.session.commit()
         if applied_count:
             brand = await Brand.get(brand_id)
@@ -84,6 +96,130 @@ async def change_set_apply(task_id: str, brand_id: str) -> None:
                 await Database.session.flush()
             else:
                 await Notification.create(organization_id=brand.organization_id, kind=KIND_UPDATE, title=title, body=body, link_ref=f"change_sets/{change_set.id}")
+
+
+##############################
+# SEO BRIDGE (Yoast's description field) + LIVE VERIFICATION
+##############################
+
+SEO_BRIDGE_KIND = "seo_bridge"
+VERIFY_DELAY_SECONDS = 120  # page caches (LiteSpeed etc.) purge on update; give them a moment
+VERIFY_RETRY_DELAY_SECONDS = 1800
+VERIFY_MAX_ATTEMPTS = 2
+VERIFY_CHECKING = "checking"
+VERIFY_CONFIRMED = "confirmed"
+VERIFY_NOT_SHOWING = "not_showing"
+VERIFY_WAITING_ON_BRIDGE = "waiting_on_you"
+
+
+def seo_bridge_proposal(site_url: str, waiting_ids: list[str]) -> dict:
+    """The one-tap ask: install the free helper plugin so Google descriptions
+    land where Yoast reads them. Pure."""
+    return {
+        "kind": SEO_BRIDGE_KIND,
+        "title": "Let us set your Google descriptions",
+        "summary": "Your site uses Yoast for the text under your links in Google. To write it, we add a free helper plugin. You can undo it anytime.",
+        "display": {"title": "Add a free helper plugin so we can set your Google descriptions"},
+        "operations": [{"op": "install_plugin", "slug": SEO_BRIDGE_PLUGIN, "url": site_url}],
+        "waiting_change_set_ids": waiting_ids,
+    }
+
+
+async def park_for_seo_bridge(change_set: ChangeSet, task_id: str) -> None:
+    """Park the set (failed, verification waiting_on_you) and make sure ONE
+    bridge proposal waits for the owner, listing every set it unblocks."""
+    await ChangeSet.update_status(change_set.id, STATUS_FAILED)
+    await ChangeSet.set_verification(change_set.id, {"status": VERIFY_WAITING_ON_BRIDGE, "checked_at": clock.now().isoformat()})
+    pending = [artifact for artifact in await Artifact.pending_for_brand(change_set.brand_id) if artifact.type == "change_proposal" and (artifact.content or {}).get("kind") == SEO_BRIDGE_KIND]
+    if pending:
+        bridge = pending[0]
+        waiting = list(dict.fromkeys([*(bridge.content.get("waiting_change_set_ids") or []), change_set.id]))
+        bridge.content = {**bridge.content, "waiting_change_set_ids": waiting}
+        Database.session.add(bridge)
+        await Database.session.flush()
+        return
+    site_url = (await Brand.get(change_set.brand_id)).website_url
+    await Artifact.create(task_id=task_id, brand_id=change_set.brand_id, type="change_proposal", content=seo_bridge_proposal(site_url, [change_set.id]))
+
+
+async def after_applied(change_set: ChangeSet) -> None:
+    """Follow-ups once a set is live: a bridge install re-queues the fixes it
+    unblocked; a description write gets its live re-read scheduled."""
+    artifact = await Database.session.get(Artifact, change_set.artifact_id)
+    content = (artifact.content or {}) if artifact is not None else {}
+    if content.get("kind") == SEO_BRIDGE_KIND and not await _reverted_original(change_set.id):
+        for waiting_id in content.get("waiting_change_set_ids") or []:
+            waiting = await ChangeSet.get(waiting_id)
+            if waiting.status == STATUS_FAILED:
+                await ChangeSet.update_status(waiting.id, STATUS_PENDING)
+                await create_task(brand_id=waiting.brand_id, name="change_set_apply", queue="changes", payload={"change_set_id": waiting.id}, lock=f"site:{waiting.site_id}")
+    if description_targets(change_set.operations):
+        await ChangeSet.set_verification(change_set.id, {"status": VERIFY_CHECKING, "checked_at": clock.now().isoformat(), "attempts": 0})
+        await create_task(brand_id=change_set.brand_id, name="change_set_verify", queue="changes", payload={"change_set_id": change_set.id, "attempt": 1}, delay_seconds=VERIFY_DELAY_SECONDS)
+
+
+def description_targets(operations: list[dict]) -> list[tuple[str, str]]:
+    """(page url, description) for each completed description write. Pure."""
+    return [(operation["target"], str(operation.get("value") or "")) for operation in operations if operation.get("op") == "set_field" and operation.get("field") == "meta_description" and operation.get("completed_at") and operation.get("target")]
+
+
+META_DESCRIPTION_PATTERN = re.compile(r"<meta\b[^>]*\bname\s*=\s*[\"']description[\"'][^>]*>", re.IGNORECASE)
+CONTENT_ATTRIBUTE_PATTERN = re.compile(r"\bcontent\s*=\s*(\"([^\"]*)\"|'([^']*)')", re.IGNORECASE)
+
+
+def page_description(page_html: str) -> str | None:
+    """The <meta name="description"> text Google reads, or None. Pure."""
+    tag = META_DESCRIPTION_PATTERN.search(page_html or "")
+    if not tag:
+        return None
+    content = CONTENT_ATTRIBUTE_PATTERN.search(tag.group(0))
+    return html.unescape(content.group(2) if content.group(2) is not None else content.group(3)) if content else None
+
+
+def shows_description(page_html: str, expected: str) -> bool:
+    """Does the live page carry the description we wrote (whitespace-insensitive)? Pure."""
+    found = page_description(page_html)
+    squash = lambda text: " ".join(text.split()).strip()  # noqa: E731
+    return found is not None and squash(found) == squash(html.unescape(expected))
+
+
+@app.task(name="change_set_verify", queue="changes", retry=RETRY_WITH_BACKOFF)
+async def change_set_verify(task_id: str, brand_id: str) -> None:
+    """CHAINED after a description write lands: re-read each live page (cache
+    busted) and record whether Google can actually see it. Not showing ->
+    one later retry, then the receipt says so and the issue stays open."""
+    async with task_lifecycle(task_id) as task:
+        payload = task.payload or {}
+        change_set = await ChangeSet.get(payload.get("change_set_id", ""))
+        attempt = int(payload.get("attempt") or 1)
+        if change_set.status != STATUS_APPLIED:
+            return
+        targets = description_targets(change_set.operations)
+        results = []
+        for url, expected in targets:
+            response = await fetch_page(f"{url}{'&' if '?' in url else '?'}evergreen_check={int(clock.now().timestamp())}")
+            results.append(response is not None and response.status_code < 400 and shows_description(response.text, expected))
+        if all(results):
+            await ChangeSet.set_verification(change_set.id, {"status": VERIFY_CONFIRMED, "checked_at": clock.now().isoformat(), "attempts": attempt})
+            return
+        if attempt < VERIFY_MAX_ATTEMPTS:
+            await ChangeSet.set_verification(change_set.id, {"status": VERIFY_CHECKING, "checked_at": clock.now().isoformat(), "attempts": attempt})
+            await create_task(brand_id=brand_id, name="change_set_verify", queue="changes", payload={"change_set_id": change_set.id, "attempt": attempt + 1}, delay_seconds=VERIFY_RETRY_DELAY_SECONDS)
+            return
+        await ChangeSet.set_verification(change_set.id, {"status": VERIFY_NOT_SHOWING, "checked_at": clock.now().isoformat(), "attempts": attempt})
+        await reopen_findings_not_showing(change_set.artifact_id)
+        logger.warning(f"[changes] change set {change_set.id}: description written but the live page doesn't show it")
+
+
+async def reopen_findings_not_showing(artifact_id: str) -> None:
+    """The fix is live in the CMS but not on the page: its issues go back to
+    open with the fix_did_not_take marker ("Still showing after our fix"),
+    the same state the next site check would have found."""
+    artifact = await Database.session.get(Artifact, artifact_id)
+    finding_ids = proposal_finding_ids(artifact.content) if artifact is not None and artifact.type == "change_proposal" else []
+    for finding in await Finding.by_ids_for_update(finding_ids):
+        if finding.status == STATUS_FIXED:
+            await Finding.set_lifecycle(finding, STATUS_OPEN, {**(finding.detail or {}), FIX_DID_NOT_TAKE_KEY: True})
 
 
 async def sync_findings_with_fix(artifact_id: str) -> list[tuple[str, str]]:
@@ -164,7 +300,10 @@ def operations_for_artifact(artifact: Artifact) -> list[dict] | None:
     via gbp_apply (worker/tasks/reputation.py), not the site engine."""
     if artifact.type == "change_proposal" and artifact.content.get("operations"):
         # the deterministic fix tier's shape: [{field, url, value}]
-        return [_operation(index, "set_field", target=proposed["url"], field=proposed["field"], value=proposed["value"]) for index, proposed in enumerate(artifact.content["operations"])]
+        return [
+            _operation(index, "install_plugin", target=proposed.get("url"), value={"slug": proposed["slug"]}) if proposed.get("op") == "install_plugin" else _operation(index, "set_field", target=proposed["url"], field=proposed["field"], value=proposed["value"])
+            for index, proposed in enumerate(artifact.content["operations"])
+        ]
 
     if artifact.type == "draft":
         page_content = {content_field: artifact.content.get(content_field) for content_field in ("title", "meta_description", "body_markdown")}
@@ -195,6 +334,9 @@ def invert_operations(change_set: ChangeSet) -> list[dict] | None:
     for index, operation in enumerate(reversed(completed_operations)):
         if operation["op"] == "publish_page" and operation.get("created_ref"):
             inverse_operations.append(_operation(index, "unpublish_page", target=operation["created_ref"], value=None))
+            continue
+        if operation["op"] == "install_plugin" and operation.get("created_ref") and operation.get("previous_value") != "active":
+            inverse_operations.append(_operation(index, "deactivate_plugin", target=operation["created_ref"], value=None))
             continue
         if operation["op"] not in ("set_field", "update_page"):
             return None

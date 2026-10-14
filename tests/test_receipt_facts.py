@@ -162,10 +162,11 @@ async def test_approvals_endpoint_adds_recent_and_keeps_existing_keys(monkeypatc
     monkeypatch.setattr(reads.Brand, "get", _returns(SimpleNamespace(id="b1")))
     monkeypatch.setattr(reads.Task, "for_brand", _returns([]))
     monkeypatch.setattr(reads.Artifact, "pending_for_brand", _returns([]))
+    monkeypatch.setattr(reads.Connection, "connected_for_brand", _returns([]))
     monkeypatch.setattr(receipt_facts.Artifact, "decided_for_brand", _returns([fix]))
     monkeypatch.setattr(receipt_facts.ChangeSet, "for_artifacts", _returns([_change_set("cs1", "applied", artifact_id="fix", applied_at=NOW)]))
     payload = await reads.approvals("b1")
-    assert set(payload) == {"pending", "waiting_on_you", "recent"}
+    assert set(payload) == {"pending", "waiting_on_you", "recent", "gbp_connected"}
     assert payload["recent"] == [{"id": "fix", "type": "change_proposal", "title": "Add a title to your homepage", "decision": "auto_approved", "decided_at": NOW.isoformat() + "+00:00", "change_set_id": "cs1"}]
 
 

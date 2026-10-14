@@ -250,6 +250,7 @@ PENDING_LABELS = {
     "gbp_touches": "Google Business Profile post batches",
     "flag_request": "requests for your input",
     "review_ask_templates": "review-request templates",
+    "review_ask": "review-request texts",
     "diagnosis": "drop diagnoses",
 }
 

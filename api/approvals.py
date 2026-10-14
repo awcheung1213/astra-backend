@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from objects.artifact import STATUS_APPROVED, STATUS_PENDING_REVIEW, STATUS_REJECTED, Artifact
 from objects.brand import Brand
 from objects.change_set import STATUS_APPLIED, ChangeSet
+from objects.connection import Connection
 from objects.site import Site
 from schemas.approval_schemas import DECISION_APPROVE, DECISION_REJECT, PitchEdits, RevertResponse, ReviewRequest, ReviewResponse, UnsendResponse
 from utils import clock
@@ -48,6 +49,10 @@ async def review_artifact(artifact_id: str, request: ReviewRequest, http_request
     send_at = None
     if artifact.type == "pitch" and request.decision == DECISION_APPROVE:
         send_at = await _schedule_pitch_send(artifact, request.edits)
+
+    if artifact.type == "gbp_touches" and request.decision == DECISION_APPROVE and not await gbp_connected(artifact.brand_id):
+        # no Google Business Profile connection: "Done, I posted them" — he posted them himself; nothing goes out from us
+        artifact.content = {**(artifact.content or {}), "posted_by": "owner"}
 
     verdict = STATUS_APPROVED if request.decision == DECISION_APPROVE else STATUS_REJECTED
     artifact = await Artifact.review(artifact.id, status=verdict, reviewed_by=current_user(http_request).id)
@@ -128,3 +133,7 @@ async def revert_change_set(change_set_id: str) -> RevertResponse:
     revert_set, queued_work = await create_and_dispatch_change_set(original.artifact_id, site, original.brand_id, inverse_operations)
     await ChangeSet.mark_reverted(original.id, reverted_by_change_set_id=revert_set.id)
     return RevertResponse.create({"change_set_id": original.id, "revert_change_set_id": revert_set.id, "queued_work": queued_work})
+
+
+async def gbp_connected(brand_id: str) -> bool:
+    return any(connection.provider == "gbp" for connection in await Connection.connected_for_brand(brand_id))

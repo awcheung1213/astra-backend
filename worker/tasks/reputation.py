@@ -1,15 +1,20 @@
 """The Reputation agent's cadences (deliverables #14, #15): weekly GBP
-touches and the review-ask templates. Drafts land behind the tone gate;
+touches and the review-ask text. Drafts land behind the tone gate;
 nothing posts or sends from here — the approval endpoint hands approved
 work to the GBP/notifier adapters when those land."""
+
+from datetime import datetime, timedelta
+from urllib.parse import quote_plus
 
 from adapters.agents.claude_agent import ClaudeAgent
 from adapters.gbp_adapter import GBPAdapter
 from objects.artifact import STATUS_APPROVED, STATUS_AUTO_APPROVED, STATUS_PENDING_REVIEW, Artifact
-from objects.brand import Brand
+from objects.brand import FOOTPRINT_LOCAL, Brand
 from objects.connection import Connection
+from objects.market import Market
 from objects.notification import KIND_ALERT, URGENCY_URGENT, Notification
 from objects.review import Review
+from utils import clock
 from utils.agent_json import parse_agent_json
 from utils.agent_prompts import ROLE_REPUTATION
 from utils.logger import logger
@@ -50,39 +55,54 @@ async def gbp_management(task_id: str, brand_id: str) -> None:
 
 @app.task(name="review_asks", queue="reputation", retry=RETRY_WITH_BACKOFF)
 async def review_asks(task_id: str, brand_id: str) -> None:
-    """#15 — review generation: the ASKS are ours; the reviews are
-    structurally the client's customers to give. v1 maintains the brand's ask
-    TEMPLATES (email + SMS): the weekly tick no-ops while a current template
-    artifact exists (rejected ones regenerate), so the cadence stays cheap
-    until the sending machinery lands."""
+    """#15 — review generation, the honest v1: we can't text his customers
+    (no customer list, no SMS), so the deliverable is a ready-to-send TEXT
+    with his Google link that he copies and sends himself — one
+    `review_ask` card, built without an LLM ($0, no invented facts). "I
+    sent it" (approve) quiets it for REVIEW_ASK_QUIET_DAYS; "Not now"
+    (reject) brings it back next week. The old template artifacts (raw JSON,
+    never sent) retire on the first run."""
     async with task_lifecycle(task_id):
         brand = await Brand.get(brand_id)
-        current_templates = await Artifact.latest(brand.id, type="review_ask_templates", statuses=[STATUS_PENDING_REVIEW, STATUS_APPROVED, STATUS_AUTO_APPROVED])
-        if current_templates is not None:
-            logger.info(f"[reputation] brand {brand.id}: ask templates current — nothing to do")
+        await Artifact.retire_pending(brand.id, type="review_ask_templates")
+        current = await Artifact.latest(brand.id, type="review_ask")
+        if current is not None and review_ask_is_current(current.status, current.reviewed_at, clock.now()):
+            logger.info(f"[reputation] brand {brand.id}: review ask current — nothing to do")
             return
+        city = await _home_city(brand)
+        link = review_search_link(brand.name, city)
+        await Artifact.create(task_id=task_id, brand_id=brand.id, type="review_ask", content={"text": review_ask_text(brand.name, link), "link": link})
+        logger.info(f"[reputation] brand {brand.id}: review ask ready")
 
-        agent_output = await ClaudeAgent().run_role(
-            ROLE_REPUTATION,
-            prompt=_ask_templates_prompt(brand),
-            tools=[],
-            handlers={},
-            operation="review_asks",
-            organization_id=brand.organization_id,
-            brand_id=brand.id,
-            task_id=task_id,
-        )
-        templates = parse_agent_json(agent_output)
-        email_valid = isinstance(templates, dict) and isinstance(templates.get("email"), dict) and templates["email"].get("subject") and templates["email"].get("body")
-        if not email_valid or not (isinstance(templates.get("sms"), str) and templates["sms"].strip()):
-            raise ValueError(f"review-ask output is not email+sms templates: {agent_output[:200]}")
 
-        await Artifact.create(task_id=task_id, brand_id=brand.id, type="review_ask_templates", content=templates)
-        # TODO(#15): actually ASKING needs two things — a customer source
-        #       (orders/calls via the metrics store or CMS adapter) to pick
-        #       eligible recent customers, and the notifier adapter to send.
-        #       Until both land, this task only maintains the templates.
-        logger.info(f"[reputation] brand {brand.id}: review-ask templates drafted for review")
+REVIEW_ASK_QUIET_DAYS = 14
+
+
+def review_ask_is_current(status: str, reviewed_at: datetime | None, now: datetime) -> bool:
+    """Waiting on him, or he sent it in the last two weeks. Pure."""
+    if status == STATUS_PENDING_REVIEW:
+        return True
+    return status in (STATUS_APPROVED, STATUS_AUTO_APPROVED) and reviewed_at is not None and now - reviewed_at < timedelta(days=REVIEW_ASK_QUIET_DAYS)
+
+
+def review_search_link(business_name: str, city: str | None) -> str:
+    """A Google search for the business: his profile shows with its "Write a
+    review" button, no place id needed. Pure."""
+    query = f"{business_name} {city}" if city else business_name
+    return f"https://www.google.com/search?q={quote_plus(query)}"
+
+
+def review_ask_text(business_name: str, link: str) -> str:
+    """The text he sends — short, his name, the link, nothing invented. Pure."""
+    return f"Hi! Thanks for choosing {business_name}. If we did a good job, a quick Google review would mean a lot: {link}"
+
+
+async def _home_city(brand: Brand) -> str | None:
+    """A local brand's first home city (helps Google find the right profile); national brands use the name alone."""
+    if brand.footprint != FOOTPRINT_LOCAL:
+        return None
+    markets = await Market.by_brand(brand_id=brand.id, brand_footprint=brand.footprint)
+    return f"{markets[0].city} {markets[0].state}" if markets else None
 
 
 @app.task(name="review_response", queue="reputation", retry=RETRY_WITH_BACKOFF)
@@ -209,20 +229,4 @@ def _reply_prompt(brand: Brand, review: Review) -> str:
         f"Brand: {brand.name}\n"
         f"Description: {brand.description}\n\n"
         f"Review ({review.platform}, {review.rating} stars, by {review.author or 'anonymous'}):\n{review.text or '(no text — rating only)'}"
-    )
-
-
-def _ask_templates_prompt(brand: Brand) -> str:
-    return (
-        "Draft the brand's review-ask templates: one email (subject + body) and one SMS, sent to a customer\n"
-        "shortly after a completed purchase or visit. Short, genuine, in the brand's voice. HARD RULES:\n"
-        "never offer incentives for reviews and never filter by sentiment first (both violate Google's\n"
-        'policy). Use "{first_name}" where the customer\'s name belongs and include the review link as\n'
-        '"{review_link}".\n\n'
-        "Respond with ONLY a JSON object, no prose and no code fences:\n"
-        '{"email": {"subject": "...", "body": "..."}, "sms": "..."}\n\n'
-        f"Brand: {brand.name} ({brand.website_url})\n"
-        f"Category: {brand.category}\n"
-        f"Description: {brand.description}\n"
-        f"Audience: {brand.audience}"
     )

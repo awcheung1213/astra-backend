@@ -20,6 +20,13 @@ class CmsWriteError(Exception):
         self.status_code = status_code
 
 
+class SeoBridgeNeeded(CmsWriteError):
+    """The site's SEO plugin owns the Google description, but its field isn't
+    writable over the CMS API yet: a one-tap helper plugin install (its own
+    approval, undoable) has to land first. Never retried — the engine parks
+    the change set and asks the owner instead (worker/tasks/changes.py)."""
+
+
 Checkpoint = Callable[[dict], Awaitable[None]]
 """How an adapter hands the engine progress mid-operation: {"previous_value"}
 BEFORE its write, {"created_ref"} right after a create. The engine COMMITS it

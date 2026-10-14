@@ -31,6 +31,8 @@ DECISION_AUTO_APPROVED = "auto_approved"
 DECISION_SENT = "sent"
 DECISION_MARKED_SENT = "marked_sent"  # the owner sent it himself and tapped "I sent it"
 DECISION_CANCELLED = "cancelled"
+DECISION_POSTED_YOURSELF = "posted_yourself"  # Google posts with no GBP connection: he copied and posted them
+DECISION_SENT_YOURSELF = "sent_yourself"  # a review-ask text he copied and sent
 
 
 ##############################
@@ -48,6 +50,10 @@ def decision(artifact) -> str:
         return DECISION_REJECTED
     if artifact.status == STATUS_AUTO_APPROVED:
         return DECISION_AUTO_APPROVED
+    if artifact.type == "gbp_touches" and (artifact.content or {}).get("posted_by") == "owner":
+        return DECISION_POSTED_YOURSELF
+    if artifact.type == "review_ask":
+        return DECISION_SENT_YOURSELF
     send = (artifact.content or {}).get("send") if artifact.type == "pitch" else None
     if isinstance(send, dict):
         if send.get("status") == SEND_SENT:
@@ -94,6 +100,8 @@ def decision_title(artifact, change_set=None) -> str:
         return f"{count} posts for your Google Business Profile" if count else "Posts for your Google Business Profile"
     if artifact.type == "review_ask_templates":
         return "Messages asking customers for reviews"
+    if artifact.type == "review_ask":
+        return "A text asking customers for Google reviews"
     return "Work we did for you"
 
 

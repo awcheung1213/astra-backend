@@ -24,6 +24,7 @@ from objects.task import Task
 from utils.database import Database
 from utils.logger import logger
 from utils.pitch_mail import SEND_DELAY_SECONDS, SEND_SCHEDULED
+from utils.study_asks import workstream_asks
 from utils.task_queue import create_task
 from worker.tasks.changes import APPLY_ENABLED_PLATFORMS, operations_for_artifact
 
@@ -94,9 +95,11 @@ async def fan_out_approval(artifact: Artifact, approved_rows: list[int] | None =
         # data become bare client-contribution rows (no queue job; the daily
         # chase nags them; the study write-up rides content_draft once the
         # data arrives)
-        study_workstreams = [workstream for workstream in artifact.content.get("workstreams", []) if workstream.get("needs_client_data")]
-        for workstream in study_workstreams:
-            Database.session.add(Task(brand_id=artifact.brand_id, name="collect_study_data", payload={"workstream": workstream.get("name")}))
+        # each carries the exact questions (utils/study_asks.py), answered on the card itself
+        study_workstreams = [(workstream, workstream_asks(workstream)) for workstream in artifact.content.get("workstreams", [])]
+        study_workstreams = [(workstream, asks) for workstream, asks in study_workstreams if asks]
+        for workstream, asks in study_workstreams:
+            Database.session.add(Task(brand_id=artifact.brand_id, name="collect_study_data", payload={"workstream": workstream.get("name"), "asks": asks}))
         if study_workstreams:
             await Database.session.flush()
         return ["research_prompts"] + ["collect_study_data"] * len(study_workstreams)

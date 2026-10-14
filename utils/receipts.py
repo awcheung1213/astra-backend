@@ -344,7 +344,7 @@ CONTENT_FIELDS = {"content", "body_html"}
 DESCRIPTION_FIELDS = {"meta_description", "excerpt"}
 PAST_TENSE = {
     "Add": "Added", "Set": "Set", "Update": "Updated", "Make": "Made", "Publish": "Published", "Rewrite": "Rewrote", "Take": "Took", "Fix": "Fixed",
-    "Change": "Changed", "Remove": "Removed", "Write": "Wrote", "Replace": "Replaced", "Create": "Created", "Improve": "Improved", "Give": "Gave",
+    "Change": "Changed", "Remove": "Removed", "Write": "Wrote", "Replace": "Replaced", "Create": "Created", "Improve": "Improved", "Give": "Gave", "Turn": "Turned",
 }  # fmt: skip
 LD_JSON_BLOCK = re.compile(r"<script[^>]*application/ld\+json[^>]*>(.*?)</script>", re.I | re.S)
 
@@ -468,6 +468,10 @@ def describe_operation(operation: dict, page_url: str | None = None) -> dict:
         return {**entry, "what": "Rewrote this page", "before": _page_summary(previous), "after": _page_summary(value), "visible_to_visitors": True}
     if op == "unpublish_page":
         return {**entry, "page_label": "A page we published", "what": "Took down a page we had published", "before": None, "after": None, "visible_to_visitors": True}
+    if op == "install_plugin":
+        return {**entry, "page_label": "Your site", "page_url": None, "what": "Added a free helper plugin so we can set your Google descriptions", "before": None, "after": None, "visible_to_visitors": False}
+    if op == "deactivate_plugin":
+        return {**entry, "page_label": "Your site", "page_url": None, "what": "Turned off the helper plugin", "before": None, "after": None, "visible_to_visitors": False}
     return {**entry, "what": "Changed part of your site", "before": None, "after": None, "visible_to_visitors": True}
 
 
@@ -499,6 +503,10 @@ def headline_present(change_set, artifact) -> str:
         return f"Rewrite {page}"
     if op == "unpublish_page":
         return "Take down a page we published"
+    if op == "install_plugin":
+        return "Add a free helper plugin so we can set your Google descriptions"
+    if op == "deactivate_plugin":
+        return "Turn off the helper plugin"
     if field in CONTENT_FIELDS:
         card = card_change(operation.get("previous_value"), operation.get("value"))
         if card == "added":
@@ -638,6 +646,8 @@ def artifact_outcome(artifact) -> dict | None:
         kind, title = "draft", f"Wrote {count} posts for your Google Business Profile" if count else "Wrote posts for your Google Business Profile"
     elif artifact.type == "review_ask_templates":
         kind, title = "draft", "Wrote messages you can send to ask customers for reviews"
+    elif artifact.type == "review_ask":
+        kind, title = "draft", "Wrote a text you can send customers to ask for Google reviews"
     if kind is None:
         return None
     return {"id": artifact.id, "kind": kind, "title": title, "when": artifact.created_at, "ref": _ref("artifact", artifact.id)}

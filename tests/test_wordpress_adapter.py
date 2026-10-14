@@ -55,6 +55,7 @@ def test_fields_resolve_to_the_cms_native_slot_or_nothing():
 
 async def test_set_field_reads_and_writes_the_same_native_field():
     adapter = _adapter({})
+    adapter._seo_plugin_name = None  # no SEO plugin: the description is the excerpt (Yoast sites: tests/test_round6_fixes.py)
     writes = []
 
     async def fake_request(client, method, path, json_body=None):

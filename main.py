@@ -47,6 +47,7 @@ from api.answers import router as answers_router  # noqa: E402
 from api.approvals import router as approvals_router  # noqa: E402
 from api.ask import router as ask_router  # noqa: E402
 from api.brands import router as brands_router  # noqa: E402
+from api.client_tasks import router as client_tasks_router  # noqa: E402
 from api.competitors import router as competitors_router  # noqa: E402
 from api.connections import public_router as connections_public_router  # noqa: E402
 from api.connections import router as connections_router  # noqa: E402
@@ -64,6 +65,7 @@ app.include_router(answers_router, dependencies=GUARDED)
 app.include_router(approvals_router, dependencies=GUARDED)
 app.include_router(ask_router, dependencies=GUARDED)
 app.include_router(brands_router, dependencies=GUARDED)
+app.include_router(client_tasks_router, dependencies=GUARDED)
 app.include_router(competitors_router, dependencies=GUARDED)
 app.include_router(connections_router, dependencies=GUARDED)
 app.include_router(connections_public_router)

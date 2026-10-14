@@ -43,6 +43,7 @@ from schemas.base_schemas import utc_iso
 from utils import answer_stats, clock, owner_calendar, receipt_facts, receipts, traffic
 from utils.authz import current_user
 from utils.site_overview import issue_groups, site_pages_summary
+from utils.study_asks import answered_lines, asks_for
 from worker.tasks.briefs import CLIENT_TASK_NAMES
 from worker.tasks.site_audit import AUDIT_KINDS
 
@@ -247,6 +248,7 @@ def _change_set_entry(change_set: ChangeSet, artifact: Artifact | None, change_s
         "operations": [_ledger_operation(operation) for operation in change_set.operations],
         "applied_at": utc_iso(change_set.applied_at),
         "reverted_by": change_set.reverted_by_change_set_id,
+        "verification": getattr(change_set, "verification", None),
         **receipts.ledger_entry(change_set, artifact, original),
     }
 
@@ -309,6 +311,7 @@ async def change_set_detail(change_set_id: str) -> dict:
         "operations": [_ledger_operation(operation) for operation in change_set.operations],
         "applied_at": utc_iso(change_set.applied_at),
         "reverted_by": change_set.reverted_by_change_set_id,
+        "verification": getattr(change_set, "verification", None),
         **receipts.ledger_entry(change_set, artifact, original),
         "changes": receipts.change_details(change_set, original),
         **receipt_facts.receipt_additions(change_set, artifact),
@@ -335,7 +338,12 @@ async def approvals(brand_id: str) -> dict:
         ],
         # workstream: a plan can ask for case-study data per workstream — two
         # identical "Share the data" cards read as a bug without their names
-        "waiting_on_you": [{"id": task.id, "name": task.name, "workstream": (task.payload or {}).get("workstream"), "days_waiting": (clock.now() - task.created_at).days if task.created_at else 0} for task in client_tasks],
+        # asks: the exact questions a plan step needs, answered on the card (utils/study_asks.py)
+        "waiting_on_you": [
+            {"id": task.id, "name": task.name, "workstream": (task.payload or {}).get("workstream"), "days_waiting": (clock.now() - task.created_at).days if task.created_at else 0, **({"asks": asks_for(task.payload)} if task.name == "collect_study_data" else {})} for task in client_tasks
+        ],
+        # Google posts approve into "he posts them himself" until a Google Business Profile is connected
+        "gbp_connected": any(connection.provider == "gbp" for connection in await Connection.connected_for_brand(brand_id)),
         "recent": await receipt_facts.recent_decisions(brand_id),  # the last 10 decided (receipt_facts.recent_entry)
     }
 
@@ -366,8 +374,11 @@ async def roadmap(brand_id: str) -> dict:
     draft_tasks = await Task.in_flight(brand_id, "content_draft")
     # a workstream "needs you" while its client-data task (#25) still waits
     study_waiting = {(task.payload or {}).get("workstream") for task in await Task.in_flight(brand_id, "collect_study_data")}
+    study_answered = [task for task in await Task.done_since(brand_id, ["collect_study_data"]) if (task.payload or {}).get("answers")]
     return {
-        "goals": [{"metric": goal.metric, "target": float(goal.target), "deadline": goal.deadline.isoformat() if goal.deadline else None} for goal in await Goal.active(brand_id)],
+        "goals": [{"metric": goal.metric, "target": float(goal.target), "deadline": goal.deadline.isoformat() if goal.deadline else None, "baseline": float(goal.baseline) if goal.baseline is not None else None, "baseline_at": utc_iso(goal.baseline_at)} for goal in await Goal.active(brand_id)],
+        # what the owner answered per plan step ("Starting point: $X a month")
+        "answers": {(task.payload or {}).get("workstream"): answered_lines(task.payload) for task in study_answered},
         "plan": plan.content if plan else None,
         "workstreams": receipts.plan_workstreams(plan.content, needs_you_names={name for name in study_waiting if name}) if plan else [],
         "publishing_next": [{"title": (task.payload or {}).get("entry", {}).get("title")} for task in draft_tasks],

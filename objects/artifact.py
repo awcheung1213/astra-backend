@@ -144,6 +144,13 @@ class Artifact(SQLModel, BaseObject, table=True):
         return result.rowcount or 0
 
     @staticmethod
+    async def retire_pending(brand_id: str, type: str) -> int:
+        """Retire every still-pending artifact of a type no longer produced
+        (out of the approvals queue, kept for the record)."""
+        result = await Database.session.execute(update(Artifact).where(Artifact.brand_id == brand_id).where(Artifact.type == type).where(Artifact.status == STATUS_PENDING_REVIEW).values(status=STATUS_SUPERSEDED, reviewed_at=clock.now()))  # type: ignore
+        return result.rowcount or 0
+
+    @staticmethod
     async def latest(brand_id: str, type: str, statuses: list[str] | None = None) -> "Artifact | None":
         """Newest artifact of a type for a brand, optionally filtered to given
         statuses (e.g. only approved plans)."""
