@@ -27,7 +27,7 @@ from sqlalchemy import select
 
 from adapters.cms.common import Checkpoint, CmsWriteError, SeoBridgeNeeded
 from adapters.cms.shopify_adapter import ShopifyAdapter
-from adapters.cms.wordpress_adapter import SEO_BRIDGE_PLUGIN, WordPressAdapter
+from adapters.cms.wordpress_adapter import DESCRIPTION_WRITE_FIELDS, SEO_BRIDGE_PLUGIN, WordPressAdapter
 from objects.artifact import Artifact
 from objects.brand import Brand
 from objects.change_set import STATUS_APPLIED, STATUS_APPLYING, STATUS_FAILED, STATUS_PENDING, STATUS_REVERTED, ChangeSet
@@ -160,7 +160,7 @@ async def after_applied(change_set: ChangeSet) -> None:
 
 def description_targets(operations: list[dict]) -> list[tuple[str, str]]:
     """(page url, description) for each completed description write. Pure."""
-    return [(operation["target"], str(operation.get("value") or "")) for operation in operations if operation.get("op") == "set_field" and operation.get("field") == "meta_description" and operation.get("completed_at") and operation.get("target")]
+    return [(operation["target"], str(operation.get("value") or "")) for operation in operations if operation.get("op") == "set_field" and operation.get("field") in DESCRIPTION_WRITE_FIELDS and operation.get("completed_at") and operation.get("target")]
 
 
 META_DESCRIPTION_PATTERN = re.compile(r"<meta\b[^>]*\bname\s*=\s*[\"']description[\"'][^>]*>", re.IGNORECASE)

@@ -132,6 +132,15 @@ def test_yoast_description_writes_yoasts_field_and_records_the_old_one():
     assert calls == [("POST", "/wp-json/wp/v2/pages/7", {"meta": {YOAST_DESCRIPTION_META: "New description"}})]
 
 
+def test_agent_mode_excerpt_fixes_also_go_to_yoasts_field():
+    calls: list = []
+    adapter = _adapter(SEO_YOAST, calls)
+    page = {"id": 7, "meta": {YOAST_DESCRIPTION_META: ""}, "excerpt": {"raw": "x"}}
+    assert asyncio.run(adapter._set_field(None, "pages", page, "excerpt", "New")) == {"previous_value": ""}
+    assert calls == [("POST", "/wp-json/wp/v2/pages/7", {"meta": {YOAST_DESCRIPTION_META: "New"}})]
+    assert changes.description_targets([{"op": "set_field", "field": "excerpt", "target": "https://reyes.com/", "value": "New", "completed_at": "x"}]) == [("https://reyes.com/", "New")]
+
+
 def test_without_yoast_the_description_stays_on_the_excerpt():
     calls: list = []
     adapter = _adapter(None, calls)

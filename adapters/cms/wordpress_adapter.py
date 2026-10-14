@@ -37,6 +37,8 @@ from utils.token_crypto import decrypt_credentials
 SEO_BRIDGE_PLUGIN = "seo-fields-api-support"  # wordpress.org slug: registers Yoast's title/description meta for REST writes
 YOAST_DESCRIPTION_META = "_yoast_wpseo_metadesc"
 SEO_YOAST = "yoast"
+# a description fix names either field (proposals use the alias; agent-mode fixes the native slot) — on a Yoast site both mean Yoast's description
+DESCRIPTION_WRITE_FIELDS = ("meta_description", "excerpt")
 
 
 def seo_plugin_from_namespaces(namespaces: list[str]) -> str | None:
@@ -114,7 +116,7 @@ class WordPressAdapter:
     ##############################
 
     async def _set_field(self, client: AsyncSession, kind: str, page: dict, field: str, value, checkpoint: Checkpoint = no_checkpoint) -> dict:
-        if field == "meta_description" and await self._seo_plugin(client) == SEO_YOAST:
+        if field in DESCRIPTION_WRITE_FIELDS and await self._seo_plugin(client) == SEO_YOAST:
             return await self._set_yoast_description(client, kind, page, value, checkpoint)
         native = self.resolve_field(field)
         previous_value = _raw(page.get(native))
