@@ -70,7 +70,7 @@ async def review_asks(task_id: str, brand_id: str) -> None:
             logger.info(f"[reputation] brand {brand.id}: review ask current — nothing to do")
             return
         city = await _home_city(brand)
-        link = review_search_link(brand.name, city)
+        link = review_search_link(brand.name, city or _domain(brand.website_url))
         await Artifact.create(task_id=task_id, brand_id=brand.id, type="review_ask", content={"text": review_ask_text(brand.name, link), "link": link})
         logger.info(f"[reputation] brand {brand.id}: review ask ready")
 
@@ -95,6 +95,12 @@ def review_search_link(business_name: str, city: str | None) -> str:
 def review_ask_text(business_name: str, link: str) -> str:
     """The text he sends — short, his name, the link, nothing invented. Pure."""
     return f"Hi! Thanks for choosing {business_name}. If we did a good job, a quick Google review would mean a lot: {link}"
+
+
+def _domain(website_url: str | None) -> str | None:
+    """'https://www.reyes.com/' -> 'reyes.com': with no city, the domain keeps a common name ("Evergreen") pointed at HIS business. Pure."""
+    host = (website_url or "").lower().split("//", 1)[-1].split("/", 1)[0].removeprefix("www.")
+    return host or None
 
 
 async def _home_city(brand: Brand) -> str | None:
